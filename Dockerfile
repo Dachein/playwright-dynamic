@@ -44,7 +44,8 @@ RUN apt-get update && \
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# 6. 安装 Playwright Chromium 浏览器
+# 6. 安装 Playwright Chromium 浏览器（走国内镜像加速）
+ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
 RUN npx playwright install chromium
 
 # 7. 复制源代码

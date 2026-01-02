@@ -1,0 +1,22 @@
+{
+  "name": "playwright-dynamic",
+  "version": "1.0.0",
+  "description": "国内 Playwright 服务 - 用于动态规则提取与微信公众号内容抓取",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "docker:build": "docker build -t playwright-dynamic .",
+    "docker:run": "docker run -p 3000:3000 playwright-dynamic"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "playwright": "^1.40.0",
+    "turndown": "^7.2.0",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  }
+}
+

@@ -1,33 +1,62 @@
-# 🎭 Playwright CN 旗舰版镜像
+# 🎭 Playwright-Dynamic 旗舰版（原地筑巢版）
 # 
-# 采用微软官方 Playwright 镜像，省去手动配置依赖的烦恼
-# 构建: docker build -t playwright-cn .
-# 运行: docker run -p 3000:3000 -e API_TOKEN=mindtalk-secret-2026 playwright-cn
+# 不依赖海外预构建镜像，直接在国内服务器上安装
+# 构建: docker build -t playwright-dynamic .
+# 运行: docker run -d -p 3000:3000 -e API_TOKEN=xxx playwright-dynamic
 
-# 使用官方 Node.js + Playwright 镜像（已内置浏览器所需的所有依赖）
-FROM mcr.microsoft.com/playwright:v1.40.0-focal
+# 1. 使用轻量级 Node 基础镜像（国内拉取快如闪电）
+FROM node:20-bookworm-slim
 
-# 设置工作目录
+# 2. 设置工作目录
 WORKDIR /app
 
-# 复制依赖描述文件
+# 3. 换上国内的 npm 镜像源
+RUN npm config set registry https://registry.npmmirror.com
+
+# 4. 安装 Playwright 运行所需的系统依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    wget \
+    gnupg \
+    ca-certificates \
+    fonts-liberation \
+    fonts-noto-cjk \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libxshmfence1 \
+    xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# 5. 复制依赖描述并安装
 COPY package*.json ./
+RUN npm install --omit=dev
 
-# 安装依赖（只安装生产环境需要的）
-# 同时也需要安装浏览器二进制文件
-RUN npm ci --only=production && \
-    npx playwright install chromium
+# 6. 安装 Playwright Chromium 浏览器
+RUN npx playwright install chromium
 
-# 复制源代码
+# 7. 复制源代码
 COPY src ./src
 
-# 设置环境变量默认值
+# 8. 设置环境变量
 ENV PORT=3000
 ENV API_TOKEN=mindtalk-secret-2026
 ENV NODE_ENV=production
 
-# 暴露端口
+# 9. 暴露端口
 EXPOSE 3000
 
-# 启动服务
+# 10. 启动服务
 CMD ["node", "src/index.js"]

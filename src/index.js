@@ -318,18 +318,221 @@ app.post('/content', authMiddleware, async (req, res) => {
 })
 
 // ============================================
+// 📸 截图接口
+// ============================================
+app.post('/screenshot', authMiddleware, async (req, res) => {
+  const { 
+    url, 
+    cookies, 
+    fullPage = false,        // 是否全页截图
+    type = 'png',            // png 或 jpeg
+    quality = 80,            // JPEG 质量 (1-100)
+    selector,                // 可选：只截取某个元素
+    viewport,                // 可选：自定义视口 { width, height }
+    extraction,              // 可选：清理规则（净化后再截图）
+    browser: browserConfig
+  } = req.body
+  
+  if (!url) return res.status(400).json({ success: false, error: 'URL is required' })
+  
+  console.log(`[Screenshot] 📸 Starting: ${url}`)
+  const startTime = Date.now()
+  let context = null
+  
+  try {
+    const browser = await getBrowser()
+    
+    context = await browser.newContext({
+      userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+      viewport: viewport || { width: 375, height: 812 },
+      isMobile: !viewport,
+      storageState: cookies?.length ? { cookies } : undefined
+    })
+    
+    const page = await context.newPage()
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    
+    // 等待页面稳定
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 5000 })
+    } catch {}
+    
+    // 🧹 如果有清理规则，先净化页面
+    if (extraction?.removeSelectors) {
+      await page.evaluate((selectors) => {
+        selectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()))
+      }, extraction.removeSelectors)
+      console.log(`[Screenshot] 🧹 Cleaned ${extraction.removeSelectors.length} selector types`)
+    }
+    
+    // 📸 截图
+    const screenshotOptions = {
+      type,
+      fullPage,
+      ...(type === 'jpeg' ? { quality } : {})
+    }
+    
+    let screenshot
+    if (selector) {
+      // 截取特定元素
+      const element = await page.$(selector)
+      if (!element) {
+        return res.status(400).json({ success: false, error: `Selector "${selector}" not found` })
+      }
+      screenshot = await element.screenshot(screenshotOptions)
+    } else {
+      screenshot = await page.screenshot(screenshotOptions)
+    }
+    
+    const duration = Date.now() - startTime
+    console.log(`[Screenshot] ✅ Done in ${duration}ms, size: ${screenshot.length} bytes`)
+    
+    res.set('Content-Type', type === 'jpeg' ? 'image/jpeg' : 'image/png')
+    res.set('X-Duration-Ms', duration.toString())
+    res.send(screenshot)
+    
+  } catch (error) {
+    console.error(`[Screenshot] ❌ Error:`, error)
+    res.status(500).json({ success: false, error: error.message })
+  } finally {
+    if (context) await context.close()
+  }
+})
+
+// ============================================
+// 📄 PDF 导出接口（支持净化）
+// ============================================
+app.post('/pdf', authMiddleware, async (req, res) => {
+  const { 
+    url, 
+    cookies,
+    format = 'A4',                    // 纸张大小：A4/Letter/Legal/Tabloid
+    printBackground = true,           // 是否打印背景
+    margin,                           // 页边距 { top, bottom, left, right }
+    displayHeaderFooter = false,      // 是否显示页眉页脚
+    headerTemplate,                   // 自定义页眉
+    footerTemplate,                   // 自定义页脚
+    scale = 1,                        // 缩放比例 (0.1 - 2)
+    landscape = false,                // 是否横向
+    extraction,                       // 🧹 清理规则（净化后再导出）
+    browser: browserConfig
+  } = req.body
+  
+  if (!url) return res.status(400).json({ success: false, error: 'URL is required' })
+  
+  console.log(`[PDF] 📄 Starting: ${url}`)
+  const startTime = Date.now()
+  let context = null
+  
+  try {
+    const browser = await getBrowser()
+    
+    // PDF 导出建议用桌面视口
+    context = await browser.newContext({
+      userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 },
+      storageState: cookies?.length ? { cookies } : undefined
+    })
+    
+    const page = await context.newPage()
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    
+    // 等待页面稳定
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 8000 })
+    } catch {}
+    
+    // 🧹 净化处理
+    if (extraction) {
+      // 移除不需要的元素
+      if (extraction.removeSelectors?.length) {
+        await page.evaluate((selectors) => {
+          selectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()))
+        }, extraction.removeSelectors)
+        console.log(`[PDF] 🧹 Removed elements: ${extraction.removeSelectors.join(', ')}`)
+      }
+      
+      // 如果指定了正文选择器，只保留正文
+      if (extraction.contentSelectors?.length) {
+        const isolated = await page.evaluate((selectors) => {
+          for (const s of selectors) {
+            const el = document.querySelector(s)
+            if (el && el.innerHTML.trim().length > 100) {
+              // 用正文内容替换整个 body
+              document.body.innerHTML = `
+                <div style="max-width: 800px; margin: 0 auto; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.8;">
+                  ${el.innerHTML}
+                </div>
+              `
+              return true
+            }
+          }
+          return false
+        }, extraction.contentSelectors)
+        
+        if (isolated) {
+          console.log(`[PDF] 🎯 Content isolated for clean PDF`)
+        }
+      }
+      
+      // 处理图片懒加载
+      await page.evaluate(() => {
+        document.querySelectorAll('img').forEach(img => {
+          const ds = img.getAttribute('data-src') || img.getAttribute('data-original')
+          if (ds) img.setAttribute('src', ds)
+        })
+      })
+    }
+    
+    // 📄 生成 PDF
+    const pdfOptions = {
+      format,
+      printBackground,
+      scale,
+      landscape,
+      margin: margin || { top: '20px', bottom: '20px', left: '20px', right: '20px' },
+      displayHeaderFooter,
+      ...(headerTemplate ? { headerTemplate } : {}),
+      ...(footerTemplate ? { footerTemplate } : {})
+    }
+    
+    const pdf = await page.pdf(pdfOptions)
+    
+    const duration = Date.now() - startTime
+    console.log(`[PDF] ✅ Done in ${duration}ms, size: ${pdf.length} bytes`)
+    
+    // 生成文件名
+    const title = await page.title()
+    const safeTitle = title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_').substring(0, 50) || 'document'
+    
+    res.set('Content-Type', 'application/pdf')
+    res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(safeTitle)}.pdf"`)
+    res.set('X-Duration-Ms', duration.toString())
+    res.send(pdf)
+    
+  } catch (error) {
+    console.error(`[PDF] ❌ Error:`, error)
+    res.status(500).json({ success: false, error: error.message })
+  } finally {
+    if (context) await context.close()
+  }
+})
+
+// ============================================
 // 🚀 启动
 // ============================================
 app.listen(PORT, () => {
   console.log(`
-🎭 Playwright CN Service v3.0
-=============================
+🎭 Playwright Dynamic Service v3.1
+===================================
 Port: ${PORT}
 Token: ${API_TOKEN.substring(0, 8)}...
 
 Endpoints:
   GET  /health      - 健康检查
-  POST /extract     - 🎯 动态规则提取
-  POST /content     - 只返回 HTML
+  POST /extract     - 🎯 动态规则提取 → Markdown
+  POST /content     - 📄 只返回 HTML
+  POST /screenshot  - 📸 截图 (PNG/JPEG)
+  POST /pdf         - 📑 导出 PDF (支持净化)
 `)
 })

@@ -1,0 +1,18 @@
+services:
+  playwright:
+    image: playwright-dynamic
+    build: .
+    restart: always
+    environment:
+      - API_TOKEN=mindtalk-secret-2026
+    # 🤫 重点：这里不需要映射端口到公网，安全！
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: always
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - playwright
+

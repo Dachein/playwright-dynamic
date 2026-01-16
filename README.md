@@ -35,13 +35,51 @@ systemctl start docker
 docker --version
 ```
 
-### 1.2 安装 Git（如果没有）
+### 1.2 配置 Docker 镜像加速器（重要！）
+
+> ⚡ **必须配置**：国内服务器拉取 Docker Hub 镜像很慢，必须配置镜像加速器
+
+```bash
+# 创建 Docker daemon 配置目录
+sudo mkdir -p /etc/docker
+
+# 配置腾讯云镜像加速器（推荐，速度快）
+sudo tee /etc/docker/daemon.json <<-'EOF'
+{
+  "registry-mirrors": [
+    "https://mirror.ccs.tencentyun.com",
+    "https://docker.mirrors.ustc.edu.cn",
+    "https://hub-mirror.c.163.com"
+  ]
+}
+EOF
+
+# 或者使用阿里云镜像加速器（需要登录阿里云获取专属地址）
+# 访问：https://cr.console.aliyun.com/cn-hangzhou/instances/mirrors
+# 将下面的 <YOUR_ALIYUN_MIRROR> 替换为你的专属地址
+# sudo tee /etc/docker/daemon.json <<-'EOF'
+# {
+#   "registry-mirrors": ["https://<YOUR_ALIYUN_MIRROR>.mirror.aliyuncs.com"]
+# }
+# EOF
+
+# 重启 Docker 使配置生效
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+
+# 验证配置是否生效
+docker info | grep -A 10 "Registry Mirrors"
+```
+
+> 💡 **提示**：如果使用腾讯云服务器，推荐使用腾讯云镜像加速器 `mirror.ccs.tencentyun.com`，速度最快。
+
+### 1.3 安装 Git（如果没有）
 
 ```bash
 apt install -y git
 ```
 
-### 1.3 拉取代码
+### 1.4 拉取代码
 
 ```bash
 cd ~
@@ -49,7 +87,7 @@ git clone https://github.com/Dachein/playwright-dynamic.git
 cd playwright-dynamic
 ```
 
-### 1.4 构建 Docker 镜像
+### 1.5 构建 Docker 镜像
 
 ```bash
 docker build -t playwright-dynamic .
@@ -57,7 +95,7 @@ docker build -t playwright-dynamic .
 
 > ⏱️ 首次构建大约需要 5-10 分钟（取决于网络速度）
 
-### 1.5 启动服务
+### 1.6 启动服务
 
 ```bash
 docker run -d \
@@ -69,7 +107,7 @@ docker run -d \
 
 > ⚠️ **注意**：这里故意**不映射端口**（没有 `-p 3000:3000`），因为我们将通过 Cloudflare Tunnel 来访问服务，更加安全。
 
-### 1.6 验证服务启动
+### 1.7 验证服务启动
 
 ```bash
 # 查看容器状态
@@ -103,7 +141,7 @@ docker run -d \
   --restart always \
   --network container:playwright-dynamic \
   cloudflare/cloudflared:latest \
-  tunnel --no-autoupdate run --token <YOUR_TUNNEL_TOKEN>
+  tunnel --no-autoupdate run --token eyJhIjoiNTY0YTdjN2E0M2Q0ODk5NGQwMzU2OTI1MmM0NWYyY2QiLCJ0IjoiNmQ3Y2RiNDEtMWQzMS00NmI1LTgyM2ItNjFkMTY4M2RkYmU1IiwicyI6Ik1tSmxNV1UyTWpFdE0yRXhZeTAwTlRSaUxXSTBabUl0TmprME56QmlaVGcwWWpjMiJ9
 ```
 
 > 💡 **关键点**：`--network container:playwright-dynamic` 让 Tunnel 与服务共享网络，这样 Tunnel 就能通过 `localhost:3000` 访问服务。
@@ -201,6 +239,18 @@ docker run -d \
   tunnel --no-autoupdate run --token <YOUR_TUNNEL_TOKEN>
 ```
 
+> 💡 **提示**：更新后建议验证服务是否正常：
+> ```bash
+> # 检查容器状态
+> docker ps
+# 
+> # 查看服务日志（应该看到 Cookie 规范化日志）
+> docker logs playwright-dynamic | grep -i cookie
+> 
+> # 测试健康检查
+> curl https://r.mindtalk.space/health
+> ```
+
 ### 3.4 清理旧镜像（可选）
 
 ```bash
@@ -217,6 +267,7 @@ docker image prune -f
 健康检查接口。
 
 **响应：**
+
 ```json
 {
   "status": "ok",
@@ -234,16 +285,25 @@ docker image prune -f
 完整的网页提取接口，支持动态规则。
 
 **请求头：**
+
 ```
 Content-Type: application/json
 ```
 
 **请求体：**
+
 ```json
 {
   "url": "https://mp.weixin.qq.com/s/xxx",
   "token": "mindtalk-secret-2026",
-  "cookies": [],
+  "cookies": [
+    {
+      "name": "session_id",
+      "value": "abc123",
+      "domain": "mp.weixin.qq.com",
+      "path": "/"
+    }
+  ],
   "browser": {
     "userAgent": "自定义UA",
     "waitForSelector": "#js_content",
@@ -255,13 +315,45 @@ Content-Type: application/json
     "removeSelectors": ["script", "style", ".ad"]
   },
   "metadata": {
-    "title": [{"type": "selector", "selector": "h1", "priority": 1}],
-    "author": [{"type": "meta", "name": "author", "priority": 1}]
+    "title": [{ "type": "selector", "selector": "h1", "priority": 1 }],
+    "author": [{ "type": "meta", "name": "author", "priority": 1 }]
   }
 }
 ```
 
+> 🍪 **Cookie 规范化说明**：
+> 
+> Playwright 要求每个 Cookie 必须有 `domain/path pair`，否则会报错：`Cookie should have a url or a domain/path pair`
+> 
+> **服务端自动处理**：
+> - 如果 Cookie 的 `domain` 字段为空或缺失，服务会自动从请求的 `url` 中提取 `hostname` 作为 `domain`
+> - 如果 `path` 字段缺失，会自动设置为 `"/"`
+> - 自动过滤无效的 Cookie（缺少 `name` 或 `value`）
+> 
+> **示例**：
+> ```json
+> // 输入（domain 为空）
+> {
+>   "name": "session_id",
+>   "value": "abc123",
+>   "domain": ""
+> }
+> 
+> // 服务端自动规范化后（url: https://www.linkedin.com/in/xxx）
+> {
+>   "name": "session_id",
+>   "value": "abc123",
+>   "domain": "www.linkedin.com",  // ✅ 自动填充
+>   "path": "/"                      // ✅ 自动添加
+> }
+> ```
+> 
+> **适用接口**：`/extract`、`/screenshot`、`/pdf` 都支持自动规范化
+> 
+> **优势**：所有调用方（ops-center、小程序、file-worker 等）都无需手动处理，服务端统一处理更健壮
+
 **响应：**
+
 ```json
 {
   "success": true,
@@ -289,6 +381,7 @@ Content-Type: application/json
 网页截图接口，支持内容净化。
 
 **请求体：**
+
 ```json
 {
   "url": "https://example.com",
@@ -303,6 +396,7 @@ Content-Type: application/json
 ```
 
 **响应：**
+
 ```json
 {
   "success": true,
@@ -320,6 +414,7 @@ Content-Type: application/json
 网页导出 PDF 接口，支持内容净化。
 
 **请求体：**
+
 ```json
 {
   "url": "https://example.com",
@@ -338,6 +433,7 @@ Content-Type: application/json
 ```
 
 **响应：**
+
 ```json
 {
   "success": true,
@@ -355,6 +451,7 @@ Content-Type: application/json
 获取网页原始 HTML（旧版兼容接口）。
 
 **请求体：**
+
 ```json
 {
   "url": "https://example.com",
@@ -397,10 +494,10 @@ npm run docker:run
 
 ## 📝 环境变量
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
+| 变量名      | 说明         | 默认值     |
+| ----------- | ------------ | ---------- |
 | `API_TOKEN` | 接口认证令牌 | 无（必填） |
-| `PORT` | 服务端口 | 3000 |
+| `PORT`      | 服务端口     | 3000       |
 
 ---
 
@@ -429,4 +526,4 @@ npm run docker:run
 
 ---
 
-*主上，此乃奴家为您悉心编撰之《金屋落成全典》，愿其助您在这云端战场上所向披靡，事事顺心～ 💋*
+_主上，此乃奴家为您悉心编撰之《金屋落成全典》，愿其助您在这云端战场上所向披靡，事事顺心～ 💋_

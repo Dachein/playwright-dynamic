@@ -55,6 +55,56 @@ async function getBrowser() {
 }
 
 // ============================================
+// 🍪 Cookie 规范化（统一处理 domain/path pair）
+// ============================================
+function normalizeCookies(cookies, targetUrl) {
+  if (!cookies || cookies.length === 0) return []
+  
+  // 从 URL 提取默认 domain
+  let defaultDomain = ''
+  try {
+    const urlObj = new URL(targetUrl)
+    defaultDomain = urlObj.hostname
+  } catch (e) {
+    console.warn(`[Cookie] ⚠️ Cannot parse URL: ${targetUrl}`)
+  }
+  
+  const normalized = cookies
+    .filter(c => c.name && c.value) // 过滤无效 cookie
+    .map(c => {
+      // 如果 domain 为空，使用 URL 的 hostname
+      let domain = c.domain
+      if (!domain || domain.trim() === '') {
+        domain = defaultDomain
+      }
+      // 移除开头的点（Playwright 兼容）
+      if (domain && domain.startsWith('.')) {
+        domain = domain.substring(1)
+      }
+      
+      return {
+        name: c.name,
+        value: c.value,
+        domain: domain,
+        path: c.path || '/',
+        expires: c.expires || -1,
+        httpOnly: c.httpOnly || false,
+        secure: c.secure !== undefined ? c.secure : targetUrl.startsWith('https://'),
+        sameSite: c.sameSite || 'Lax'
+      }
+    })
+    .filter(c => c.domain) // 过滤掉仍然没有 domain 的
+  
+  if (normalized.length > 0 && normalized.length !== cookies.length) {
+    console.log(`[Cookie] 🍪 Normalized ${normalized.length}/${cookies.length} cookies → domain: ${normalized[0].domain}`)
+  } else if (normalized.length > 0) {
+    console.log(`[Cookie] 🍪 ${normalized.length} cookies ready for domain: ${normalized[0].domain}`)
+  }
+  
+  return normalized
+}
+
+// ============================================
 // 📊 健康检查
 // ============================================
 app.get('/health', (req, res) => {
@@ -72,7 +122,7 @@ app.get('/health', (req, res) => {
 // ============================================
 app.post('/extract', authMiddleware, async (req, res) => {
   const startTime = Date.now()
-  const stats = { navigate: 0, scroll: 0, extract: 0, convert: 0 }
+  const stats = { setup: 0, navigate: 0, scroll: 0, extract: 0, convert: 0 }
   
   const { url, cookies, browser: browserConfig, extraction, markdown: markdownConfig, metadata: metadataRules } = req.body
   
@@ -85,29 +135,23 @@ app.post('/extract', authMiddleware, async (req, res) => {
   let context = null
   
   try {
+    const setupStart = Date.now()
     const browser = await getBrowser()
     
-    // 🎭 创建独立的浏览器上下文 (Context) - 比 Puppeteer 更轻量
+    // 🍪 规范化 cookies（确保 domain/path pair 完整）
+    const normalizedCookies = normalizeCookies(cookies, url)
+    
+    // 🎭 创建独立的浏览器上下文 (Context)
     context = await browser.newContext({
       userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42',
       viewport: { width: 375, height: 812 },
       isMobile: true,
-      // 注入 Cookie
-      storageState: cookies && cookies.length > 0 ? {
-        cookies: cookies.map(c => ({
-          name: c.name,
-          value: c.value,
-          domain: c.domain,
-          path: c.path || '/',
-          expires: c.expires || -1,
-          httpOnly: c.httpOnly || false,
-          secure: c.secure || false,
-          sameSite: c.sameSite || 'Lax'
-        }))
-      } : undefined
+      storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
     
     const page = await context.newPage()
+    stats.setup = Date.now() - setupStart
+    console.log(`[Extract] 🎭 Setup complete (+${stats.setup}ms)`)
     
     // ================================
     // 1️⃣ 导航到页面
@@ -342,11 +386,14 @@ app.post('/screenshot', authMiddleware, async (req, res) => {
   try {
     const browser = await getBrowser()
     
+    // 🍪 规范化 cookies
+    const normalizedCookies = normalizeCookies(cookies, url)
+    
     context = await browser.newContext({
       userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
       viewport: viewport || { width: 375, height: 812 },
       isMobile: !viewport,
-      storageState: cookies?.length ? { cookies } : undefined
+      storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
     
     const page = await context.newPage()
@@ -427,11 +474,14 @@ app.post('/pdf', authMiddleware, async (req, res) => {
   try {
     const browser = await getBrowser()
     
+    // 🍪 规范化 cookies
+    const normalizedCookies = normalizeCookies(cookies, url)
+    
     // PDF 导出建议用桌面视口
     context = await browser.newContext({
       userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 800 },
-      storageState: cookies?.length ? { cookies } : undefined
+      storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
     
     const page = await context.newPage()

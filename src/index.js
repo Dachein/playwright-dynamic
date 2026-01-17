@@ -220,8 +220,8 @@ app.post('/extract', authMiddleware, async (req, res) => {
       await page.waitForLoadState('domcontentloaded', { timeout: 10000 })
     } catch (e) {}
     
-    // YouTube 需要额外等待，让页面完全加载
-    if (isYouTube) {
+    // YouTube 需要额外等待，让页面完全加载（仅 DOM 模式）
+    if (isYouTube && mode === 'dom') {
       await page.waitForTimeout(2000)
     }
     
@@ -245,6 +245,14 @@ app.post('/extract', authMiddleware, async (req, res) => {
       // 📜 JScript 模式：只执行自定义脚本
       // ================================
       console.log('[Extract] 📜 JScript mode - executing custom script...')
+      
+      // ⏱️ 使用配置的等待时间（在脚本执行前）
+      const waitTime = browserConfig?.waitTime || 2000
+      if (waitTime > 0) {
+        console.log(`[Extract] ⏱️ Waiting ${waitTime}ms before script execution...`)
+        await page.waitForTimeout(waitTime)
+      }
+      
       const jscriptStart = Date.now()
       
       let scriptResult = null

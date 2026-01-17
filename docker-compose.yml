@@ -7,13 +7,18 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # 🔐 建议在服务器上通过 .env 文件或环境变量覆盖此值
       - API_TOKEN=${API_TOKEN:-mindtalk-secret-2026}
     restart: always
-    # 给容器足够的内存，毕竟浏览器是个“贪吃”的小家伙
     shm_size: '2gb'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cf-tunnel
+    restart: always
+    # 使用环境变量来传递 Token，更安全
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}

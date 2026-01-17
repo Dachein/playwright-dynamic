@@ -1,18 +1,19 @@
+version: '3.8'
+
 services:
   playwright:
-    image: playwright-dynamic
     build: .
-    restart: always
+    container_name: playwright-dynamic
+    ports:
+      - "3000:3000"
     environment:
-      - API_TOKEN=mindtalk-secret-2026
-    # 🤫 重点：这里不需要映射端口到公网，安全！
-
-  tunnel:
-    image: cloudflare/cloudflared:latest
+      # 🔐 建议在服务器上通过 .env 文件或环境变量覆盖此值
+      - API_TOKEN=${API_TOKEN:-mindtalk-secret-2026}
     restart: always
-    command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
-    depends_on:
-      - playwright
-
+    # 给容器足够的内存，毕竟浏览器是个“贪吃”的小家伙
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

@@ -31,7 +31,6 @@ RUN sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.
     libnss3 \
     libx11-xcb1 \
     libxcomposite1 \
-    libxcomposite1 \
     libxdamage1 \
     libxfixes3 \
     libxrandr2 \

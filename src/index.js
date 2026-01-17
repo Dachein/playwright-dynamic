@@ -119,18 +119,33 @@ app.get('/health', (req, res) => {
 
 // ============================================
 // 🎯 核心提取接口（Playwright 版）
+// 
+// 支持两种提取模式:
+// - dom: 传统 DOM 选择器提取（默认）
+// - jscript: 自定义脚本提取（跳过 DOM 流程）
 // ============================================
 app.post('/extract', authMiddleware, async (req, res) => {
   const startTime = Date.now()
-  const stats = { setup: 0, navigate: 0, scroll: 0, extract: 0, convert: 0 }
+  const stats = { setup: 0, navigate: 0, scroll: 0, extract: 0, convert: 0, jscript: 0 }
   
-  const { url, cookies, browser: browserConfig, extraction, markdown: markdownConfig, metadata: metadataRules } = req.body
+  const { 
+    url, 
+    cookies, 
+    browser: browserConfig, 
+    extraction, 
+    markdown: markdownConfig, 
+    metadata: metadataRules,
+    extractionMode,  // NEW: 'dom' | 'jscript'
+    customScript     // NEW: jscript 模式时的自定义脚本
+  } = req.body
+  
+  const mode = extractionMode || 'dom'
   
   if (!url) {
     return res.status(400).json({ success: false, error: 'URL is required' })
   }
   
-  console.log(`[Extract] 🚀 Playwright Starting: ${url}`)
+  console.log(`[Extract] 🚀 Playwright Starting (mode: ${mode}): ${url}`)
   
   let context = null
   
@@ -179,8 +194,60 @@ app.post('/extract', authMiddleware, async (req, res) => {
     }
     
     // ================================
-    // 2️⃣ 滚动加载
+    // 🔀 根据模式分流处理
     // ================================
+    
+    if (mode === 'jscript' && customScript) {
+      // ================================
+      // 📜 JScript 模式：只执行自定义脚本
+      // ================================
+      console.log('[Extract] 📜 JScript mode - executing custom script...')
+      const jscriptStart = Date.now()
+      
+      let scriptResult = null
+      try {
+        scriptResult = await page.evaluate(customScript)
+      } catch (e) {
+        console.error('[Extract] ❌ JScript error:', e.message)
+        scriptResult = { error: e.message }
+      }
+      
+      stats.jscript = Date.now() - jscriptStart
+      
+      const duration = Date.now() - startTime
+      console.log(`[Extract] 🎉 JScript Done in ${duration}ms`)
+      
+      // 如果脚本返回了完整结果，直接使用
+      if (scriptResult && !scriptResult.error) {
+        res.json({
+          success: true,
+          markdown: scriptResult.markdown || '',
+          metadata: scriptResult.metadata || {},
+          scriptResult: scriptResult,
+          stats: {
+            mode: 'jscript',
+            markdownLength: (scriptResult.markdown || '').length,
+            duration,
+            steps: stats
+          }
+        })
+      } else {
+        // 脚本执行失败
+        res.status(500).json({
+          success: false,
+          error: scriptResult?.error || 'JScript execution failed',
+          scriptResult: scriptResult,
+          stats: { mode: 'jscript', duration, steps: stats }
+        })
+      }
+      return
+    }
+    
+    // ================================
+    // 🌐 DOM 模式：传统提取流程
+    // ================================
+    
+    // 2️⃣ 滚动加载
     const scrollStart = Date.now()
     if (browserConfig?.scrollToLoad !== false) {
       await page.evaluate(async () => {
@@ -207,9 +274,7 @@ app.post('/extract', authMiddleware, async (req, res) => {
     }
     stats.scroll = Date.now() - scrollStart
     
-    // ================================
-    // 3️⃣ 在浏览器内执行提取
-    // ================================
+    // 3️⃣ 在浏览器内执行 DOM 提取
     const extractStart = Date.now()
     
     const extractionRules = extraction || {
@@ -284,9 +349,7 @@ app.post('/extract', authMiddleware, async (req, res) => {
     
     stats.extract = Date.now() - extractStart
     
-    // ================================
     // 4️⃣ Markdown 转换
-    // ================================
     const convertStart = Date.now()
     const turndownService = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '-', hr: '---' })
     turndownService.remove(['script', 'style', 'noscript', 'iframe'])
@@ -308,16 +371,17 @@ app.post('/extract', authMiddleware, async (req, res) => {
     stats.convert = Date.now() - convertStart
     
     // ================================
-    // 📦 返回
+    // 📦 返回 DOM 模式结果
     // ================================
     const duration = Date.now() - startTime
-    console.log(`[Extract] 🎉 Playwright Done in ${duration}ms`)
+    console.log(`[Extract] 🎉 DOM Done in ${duration}ms`)
     
     res.json({
       success: true,
       markdown,
       metadata: extractResult.metadata,
       stats: {
+        mode: 'dom',
         htmlLength: extractResult.html.length,
         markdownLength: markdown.length,
         duration,

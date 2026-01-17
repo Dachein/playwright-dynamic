@@ -240,15 +240,24 @@ docker run -d \
 ```
 
 > 💡 **提示**：更新后建议验证服务是否正常：
+>
 > ```bash
 > # 检查容器状态
 > docker ps
-# 
+> ```
+
+#
+
 > # 查看服务日志（应该看到 Cookie 规范化日志）
+>
 > docker logs playwright-dynamic | grep -i cookie
-> 
+>
 > # 测试健康检查
+>
 > curl https://r.mindtalk.space/health
+>
+> ```
+>
 > ```
 
 ### 3.4 清理旧镜像（可选）
@@ -322,15 +331,17 @@ Content-Type: application/json
 ```
 
 > 🍪 **Cookie 规范化说明**：
-> 
+>
 > Playwright 要求每个 Cookie 必须有 `domain/path pair`，否则会报错：`Cookie should have a url or a domain/path pair`
-> 
+>
 > **服务端自动处理**：
+>
 > - 如果 Cookie 的 `domain` 字段为空或缺失，服务会自动从请求的 `url` 中提取 `hostname` 作为 `domain`
 > - 如果 `path` 字段缺失，会自动设置为 `"/"`
 > - 自动过滤无效的 Cookie（缺少 `name` 或 `value`）
-> 
+>
 > **示例**：
+>
 > ```json
 > // 输入（domain 为空）
 > {
@@ -338,7 +349,7 @@ Content-Type: application/json
 >   "value": "abc123",
 >   "domain": ""
 > }
-> 
+>
 > // 服务端自动规范化后（url: https://www.linkedin.com/in/xxx）
 > {
 >   "name": "session_id",
@@ -347,9 +358,9 @@ Content-Type: application/json
 >   "path": "/"                      // ✅ 自动添加
 > }
 > ```
-> 
+>
 > **适用接口**：`/extract`、`/screenshot`、`/pdf` 都支持自动规范化
-> 
+>
 > **优势**：所有调用方（ops-center、小程序、file-worker 等）都无需手动处理，服务端统一处理更健壮
 
 **响应：**

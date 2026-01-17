@@ -20,5 +20,9 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: cf-tunnel
     restart: always
+    # 共享 playwright 的网络命名空间，这样就能通过 localhost:3000 访问
+    network_mode: service:playwright
+    depends_on:
+      - playwright
     # 使用环境变量来传递 Token，更安全
     command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}

@@ -20,5 +20,6 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: cf-tunnel
     restart: always
+    network_mode: host  # 🔑 使用宿主机网络，让 Tunnel 能访问到 localhost:3000
     # 使用环境变量来传递 Token，更安全
     command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}

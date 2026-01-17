@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   playwright:
@@ -9,7 +9,7 @@ services:
     environment:
       - API_TOKEN=${API_TOKEN:-mindtalk-secret-2026}
     restart: always
-    shm_size: '2gb'
+    shm_size: "2gb"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 30s
@@ -20,6 +20,5 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: cf-tunnel
     restart: always
-    network_mode: host  # 🔑 使用宿主机网络，让 Tunnel 能访问到 localhost:3000
     # 使用环境变量来传递 Token，更安全
     command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}

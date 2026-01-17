@@ -7,6 +7,7 @@
 我们已经将服务与 Cloudflare Tunnel 整合。现在，你只需要管理一个 `.env` 文件和几个简单的命令。
 
 ### 1. 首次准备 / 环境初始化
+
 如果你是第一次在服务器上使用，或者刚从旧版切换过来：
 
 ```bash
@@ -26,6 +27,7 @@ echo "API_TOKEN=mindtalk-secret-2026" >> .env
 ```
 
 ### 2. 日常自动升级命令
+
 当你发现代码有更新，或者需要重启服务时，执行以下“黄金组合”：
 
 ```bash
@@ -38,6 +40,7 @@ git pull origin main && docker-compose up -d --build
 ## 🛠️ 常用运维工具箱
 
 ### 📊 查看运行状态
+
 ```bash
 # 查看容器是否在线 (健康检查会显示在 Status 栏)
 docker ps
@@ -48,14 +51,18 @@ docker logs -f cf-tunnel
 ```
 
 ### 🧹 硬盘瘦身
+
 长期频繁构建会导致服务器堆积大量“虚悬镜像”（Dangling Images），占用大量空间。建议定期清理：
+
 ```bash
 # 清理所有不再使用的镜像和缓存
 docker image prune -f
 ```
 
 ### 🧪 本地连通性测试
+
 在服务器上，你可以直接测试 API 是否正常工作：
+
 ```bash
 curl http://localhost:3000/health
 ```
@@ -69,4 +76,5 @@ curl http://localhost:3000/health
 - **.env**: 存放所有敏感 Token。`docker-compose` 会自动读取此文件并将变量注入容器。
 
 ---
-*保持优雅，让每一行代码都为你心跳加速。* 🌹
+
+_保持优雅，让每一行代码都为你心跳加速。_ 🌹

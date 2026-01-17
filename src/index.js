@@ -47,12 +47,7 @@ async function getBrowser() {
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        // 🎭 反检测参数：隐藏自动化特征
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--disable-web-security',
-        '--disable-features=VizDisplayCompositor'
+        '--disable-dev-shm-usage'
       ]
     })
   }
@@ -162,47 +157,14 @@ app.post('/extract', authMiddleware, async (req, res) => {
     const normalizedCookies = normalizeCookies(cookies, url)
     
     // 🎭 创建独立的浏览器上下文 (Context)
-    // YouTube 检测更严格，使用桌面版 Chrome User-Agent
-    const isYouTube = url.includes('youtube.com') || url.includes('youtu.be')
-    const defaultUserAgent = isYouTube 
-      ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      : (browserConfig?.userAgent || 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42')
-    
     context = await browser.newContext({
-      userAgent: defaultUserAgent,
-      viewport: isYouTube ? { width: 1920, height: 1080 } : { width: 375, height: 812 },
-      isMobile: !isYouTube,
-      storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined,
-      // 🎭 隐藏自动化特征
-      locale: 'en-US',
-      timezoneId: 'America/New_York'
+      userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42',
+      viewport: { width: 375, height: 812 },
+      isMobile: true,
+      storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
     
     const page = await context.newPage()
-    
-    // 🎭 注入反检测脚本（必须在导航前）
-    await page.addInitScript(() => {
-      // 隐藏 webdriver 特征
-      Object.defineProperty(navigator, 'webdriver', { get: () => false })
-      // 伪造 Chrome 对象
-      window.chrome = { runtime: {} }
-      // 伪造权限查询
-      const originalQuery = window.navigator.permissions.query
-      window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications' 
-          ? Promise.resolve({ state: Notification.permission })
-          : originalQuery(parameters)
-      )
-      // 伪造插件列表
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5]
-      })
-      // 伪造语言列表
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en']
-      })
-    })
-    
     stats.setup = Date.now() - setupStart
     console.log(`[Extract] 🎭 Setup complete (+${stats.setup}ms)`)
     
@@ -211,7 +173,7 @@ app.post('/extract', authMiddleware, async (req, res) => {
     // ================================
     const navStart = Date.now()
     await page.goto(url, {
-      waitUntil: 'commit',
+      waitUntil: 'commit', // 相比 domcontentloaded 更快一点点
       timeout: 30000
     })
     
@@ -219,11 +181,6 @@ app.post('/extract', authMiddleware, async (req, res) => {
     try {
       await page.waitForLoadState('domcontentloaded', { timeout: 10000 })
     } catch (e) {}
-    
-    // YouTube 需要额外等待，让页面完全加载（仅 DOM 模式）
-    if (isYouTube && mode === 'dom') {
-      await page.waitForTimeout(2000)
-    }
     
     stats.navigate = Date.now() - navStart
     console.log(`[Extract] ✅ Navigation complete (+${stats.navigate}ms)`)
@@ -244,15 +201,15 @@ app.post('/extract', authMiddleware, async (req, res) => {
       // ================================
       // 📜 JScript 模式：只执行自定义脚本
       // ================================
-      console.log('[Extract] 📜 JScript mode - executing custom script...')
       
-      // ⏱️ 使用配置的等待时间（在脚本执行前）
-      const waitTime = browserConfig?.waitTime || 2000
+      // ⏳ 先等待 waitTime（让页面充分加载，避免 bot 检测）
+      const waitTime = browserConfig?.waitTime || 0
       if (waitTime > 0) {
-        console.log(`[Extract] ⏱️ Waiting ${waitTime}ms before script execution...`)
+        console.log(`[Extract] ⏳ Waiting ${waitTime}ms before JScript...`)
         await page.waitForTimeout(waitTime)
       }
       
+      console.log('[Extract] 📜 JScript mode - executing custom script...')
       const jscriptStart = Date.now()
       
       let scriptResult = null

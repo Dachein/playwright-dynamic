@@ -17,6 +17,13 @@ const express = require('express')
 const { chromium } = require('playwright')
 const TurndownService = require('turndown')
 const cors = require('cors')
+const { exec } = require('child_process')
+const { promisify } = require('util')
+const fs = require('fs').promises
+const path = require('path')
+const os = require('os')
+
+const execAsync = promisify(exec)
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -107,11 +114,11 @@ function normalizeCookies(cookies, targetUrl) {
 // ============================================
 // 📊 健康检查
 // ============================================
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'playwright-cn',
-    version: '3.0.0',
+    version: '3.3.0',
     engine: 'playwright/chromium',
     time: new Date().toISOString()
   })
@@ -645,16 +652,16 @@ app.post('/pdf', authMiddleware, async (req, res) => {
 // ============================================
 app.listen(PORT, () => {
   console.log(`
-🎭 Playwright Dynamic Service v3.1
+🎭 Playwright Dynamic Service v3.3
 ===================================
 Port: ${PORT}
 Token: ${API_TOKEN.substring(0, 8)}...
 
 Endpoints:
-  GET  /health      - 健康检查
-  POST /extract     - 🎯 动态规则提取 → Markdown
-  POST /content     - 📄 只返回 HTML
-  POST /screenshot  - 📸 截图 (PNG/JPEG)
-  POST /pdf         - 📑 导出 PDF (支持净化)
+  GET  /health       - 健康检查
+  POST /extract      - 🎯 动态规则提取 → Markdown
+  POST /content      - 📄 只返回 HTML
+  POST /screenshot   - 📸 截图 (PNG/JPEG)
+  POST /pdf          - 📑 导出 PDF (支持净化)
 `)
 })

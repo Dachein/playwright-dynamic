@@ -37,6 +37,25 @@ const CF_WORKERS_AI_TOKEN = process.env.CF_WORKERS_AI_TOKEN
 const WHISPER_MODEL = '@cf/openai/whisper-large-v3-turbo'
 const MAX_WHISPER_SIZE = 25 * 1024 * 1024  // Workers AI Whisper 限制 25MB
 
+// ============================================
+// 🔄 异步转录任务存储（内存）
+// ============================================
+const transcriptionTasks = new Map()
+// 任务状态: pending | downloading | splitting | transcribing | completed | failed
+// 结构: { status, progress, message, transcript?, error?, created_at, updated_at, stats? }
+
+// 清理过期任务（超过 1 小时）
+setInterval(() => {
+  const now = Date.now()
+  const ONE_HOUR = 60 * 60 * 1000
+  for (const [taskId, task] of transcriptionTasks) {
+    if (now - task.created_at > ONE_HOUR) {
+      transcriptionTasks.delete(taskId)
+      console.log(`[TaskCleanup] Removed expired task: ${taskId}`)
+    }
+  }
+}, 10 * 60 * 1000)  // 每 10 分钟清理一次
+
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 
@@ -206,9 +225,16 @@ app.get('/health', async (req, res) => {
   res.json({
     status: 'ok',
     service: 'playwright-cn',
-    version: '3.3.0',
+    version: '3.6.0',
     engine: 'playwright/chromium',
     ffmpeg: ffmpegVersion ? 'available' : 'unavailable',
+    transcription: {
+      min_duration: MIN_DURATION_SECONDS,
+      smart_chunking: true,
+      target_chunks: TARGET_CHUNK_COUNT,
+      max_chunk_duration: MAX_CHUNK_DURATION,
+      max_parallel: MAX_PARALLEL
+    },
     time: new Date().toISOString()
   })
 })
@@ -843,185 +869,45 @@ app.post('/chunk-audio', authMiddleware, async (req, res) => {
 })
 
 // ============================================
-// 🎙️ 完整音频转录接口
+// 🎯 智能分块策略
 // 
-// 接受音频 URL，返回完整文字稿：
-// 1. 下载音频文件
-// 2. FFmpeg 按指定大小/时长切分
-// 3. 并行调用 Cloudflare Workers AI Whisper
-// 4. 按序拼接返回完整文字稿
+// 目标：让分块数量尽量稳定在 10 个，最大化并行效率
+// 
+// 规则：
+// - 少于 100 分钟：动态计算，确保 ~10 个块（每块最小 2 分钟）
+// - 超过 100 分钟：固定 10 分钟一块
+// 
+// 限制：
+// - chunk_duration 上限 15 分钟 (900秒)
+// - max_parallel 上限 10
 // ============================================
-app.post('/transcribe', authMiddleware, async (req, res) => {
-  const {
-    audio_url,
-    language = 'auto',           // 语言：zh/en/auto
-    chunk_size_mb = 20,          // 切分大小（MB），默认 20MB < 25MB 限制
-    chunk_duration = 120,        // 切分时长（秒），默认 2 分钟
-    max_parallel = 5             // 最大并行数
-  } = req.body
 
-  if (!audio_url) {
-    return res.status(400).json({ success: false, error: 'audio_url is required' })
+const TARGET_CHUNK_COUNT = 10        // 目标分块数
+const MIN_CHUNK_DURATION = 120       // 最小 2 分钟
+const MAX_CHUNK_DURATION = 900       // 最大 15 分钟
+const THRESHOLD_DURATION = 6000      // 100 分钟阈值
+const LONG_AUDIO_CHUNK = 600         // 长音频固定 10 分钟
+const MAX_PARALLEL = 10              // 最大并行数
+
+/**
+ * 计算最优分块时长
+ * @param {number} totalDuration - 音频总时长（秒）
+ * @returns {number} 分块时长（秒）
+ */
+function calculateOptimalChunkDuration(totalDuration) {
+  if (totalDuration >= THRESHOLD_DURATION) {
+    // 超过 100 分钟：固定 10 分钟一块
+    return LONG_AUDIO_CHUNK
   }
-
-  if (!CF_ACCOUNT_ID || !CF_WORKERS_AI_TOKEN) {
-    return res.status(500).json({
-      success: false,
-      error: 'CF_ACCOUNT_ID and CF_WORKERS_AI_TOKEN must be configured'
-    })
-  }
-
-  console.log(`[Transcribe] 🎙️ Starting: ${audio_url}`)
-  const startTime = Date.now()
-  const stats = { download: 0, probe: 0, split: 0, transcribe: 0, total: 0 }
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'transcribe-'))
-
-  try {
-    // 1. 下载音频（针对国内服务器优化：超时 + 重试）
-    const downloadStart = Date.now()
-    console.log(`[Transcribe] 📥 Downloading audio...`)
-
-    const audioBuffer = await downloadWithRetry(audio_url, {
-      timeout: 60000,  // 60 秒超时
-      maxRetries: 3,   // 最多重试 3 次
-      retryDelay: 2000 // 重试间隔 2 秒
-    })
-    const inputPath = path.join(tempDir, 'input.audio')
-    await fs.writeFile(inputPath, audioBuffer)
-
-    stats.download = Date.now() - downloadStart
-    const fileSizeMB = (audioBuffer.length / 1024 / 1024).toFixed(2)
-    console.log(`[Transcribe] ✅ Downloaded: ${fileSizeMB} MB in ${stats.download}ms`)
-
-    // 2. 获取音频时长
-    const probeStart = Date.now()
-    const { stdout: durationOutput } = await execAsync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`
-    )
-    const totalDuration = parseFloat(durationOutput.trim())
-    stats.probe = Date.now() - probeStart
-    console.log(`[Transcribe] 📊 Duration: ${totalDuration.toFixed(1)}s`)
-
-    // 3. 切分音频
-    const splitStart = Date.now()
-    const chunkCount = Math.ceil(totalDuration / chunk_duration)
-    console.log(`[Transcribe] ✂️ Splitting into ${chunkCount} chunks (${chunk_duration}s each)...`)
-
-    const chunks = []
-    for (let i = 0; i < chunkCount; i++) {
-      const chunkStart = i * chunk_duration
-      const outputPath = path.join(tempDir, `chunk_${i}.mp3`)
-
-      // FFmpeg 切分：转为 mp3，控制质量
-      const ffmpegCmd = `ffmpeg -i "${inputPath}" -ss ${chunkStart} -t ${chunk_duration} -vn -acodec libmp3lame -q:a 4 "${outputPath}" -y 2>/dev/null`
-
-      try {
-        await execAsync(ffmpegCmd)
-        const chunkBuffer = await fs.readFile(outputPath)
-        const chunkSizeMB = chunkBuffer.length / 1024 / 1024
-
-        // 检查是否超过限制
-        if (chunkBuffer.length > MAX_WHISPER_SIZE) {
-          console.warn(`[Transcribe] ⚠️ Chunk ${i + 1} exceeds 25MB (${chunkSizeMB.toFixed(2)}MB), skipping...`)
-          continue
-        }
-
-        chunks.push({
-          index: i,
-          start_time: chunkStart,
-          duration: Math.min(chunk_duration, totalDuration - chunkStart),
-          data: chunkBuffer.toString('base64'),
-          size: chunkBuffer.length
-        })
-
-        console.log(`[Transcribe] ✅ Chunk ${i + 1}/${chunkCount}: ${chunkSizeMB.toFixed(2)} MB`)
-      } catch (error) {
-        console.error(`[Transcribe] ⚠️ Failed to create chunk ${i + 1}:`, error.message)
-      }
-    }
-
-    stats.split = Date.now() - splitStart
-    console.log(`[Transcribe] ✅ Split complete in ${stats.split}ms, ${chunks.length} valid chunks`)
-
-    // 4. 并行调用 Whisper
-    const transcribeStart = Date.now()
-    console.log(`[Transcribe] 🎯 Calling Whisper for ${chunks.length} chunks (parallel: ${max_parallel})...`)
-
-    const transcripts = await transcribeChunksParallel(chunks, language, max_parallel)
-    stats.transcribe = Date.now() - transcribeStart
-
-    // 5. 按序拼接
-    transcripts.sort((a, b) => a.index - b.index)
-    const fullTranscript = transcripts
-      .filter(t => t.text)
-      .map(t => t.text.trim())
-      .join('\n\n')
-
-    const wordCount = fullTranscript.length  // 中文按字符数
-    const successCount = transcripts.filter(t => t.success).length
-
-    stats.total = Date.now() - startTime
-    console.log(`[Transcribe] 🎉 Complete in ${stats.total}ms, ${wordCount} chars, ${successCount}/${chunks.length} chunks`)
-
-    res.json({
-      success: true,
-      transcript: fullTranscript,
-      word_count: wordCount,
-      language: language,
-      stats: {
-        duration_seconds: totalDuration,
-        file_size_mb: parseFloat(fileSizeMB),
-        chunk_count: chunks.length,
-        successful_chunks: successCount,
-        timing: stats
-      }
-    })
-
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : 'Unknown error'
-    console.error(`[Transcribe] ❌ Error:`, errorMsg)
-
-    res.status(500).json({
-      success: false,
-      error: errorMsg,
-      stats: { timing: stats, total: Date.now() - startTime }
-    })
-  } finally {
-    // 清理临时文件
-    try {
-      await fs.rm(tempDir, { recursive: true, force: true })
-    } catch (e) {
-      console.warn(`[Transcribe] ⚠️ Failed to cleanup:`, e.message)
-    }
-  }
-})
-
-// ============================================
-// 并行调用 Whisper（控制并发度）
-// ============================================
-async function transcribeChunksParallel(chunks, language, maxParallel) {
-  const results = []
-
-  for (let i = 0; i < chunks.length; i += maxParallel) {
-    const batch = chunks.slice(i, i + maxParallel)
-
-    const batchResults = await Promise.all(
-      batch.map(async (chunk) => {
-        try {
-          const text = await callWhisperAPI(chunk.data, language)
-          return { index: chunk.index, text, success: true }
-        } catch (error) {
-          console.error(`[Whisper] ❌ Chunk ${chunk.index + 1} failed:`, error.message)
-          return { index: chunk.index, text: '', success: false, error: error.message }
-        }
-      })
-    )
-
-    results.push(...batchResults)
-    console.log(`[Whisper] 📊 Progress: ${Math.min(i + maxParallel, chunks.length)}/${chunks.length}`)
-  }
-
-  return results
+  
+  // 少于 100 分钟：动态计算，目标 10 个块
+  let chunkDuration = Math.ceil(totalDuration / TARGET_CHUNK_COUNT)
+  
+  // 确保在 [2分钟, 15分钟] 范围内
+  chunkDuration = Math.max(MIN_CHUNK_DURATION, chunkDuration)
+  chunkDuration = Math.min(MAX_CHUNK_DURATION, chunkDuration)
+  
+  return chunkDuration
 }
 
 // ============================================
@@ -1068,23 +954,331 @@ async function callWhisperAPI(base64Audio, language) {
 }
 
 // ============================================
+// 🎙️ 音频转录接口
+// 
+// 统一入口，立即返回 task_id，后台异步处理
+// - 低于 5 分钟的音频直接拒绝
+// - 使用智能分块策略，自动优化分块数量
+// 
+// 参数限制：
+// - chunk_duration: 上限 15 分钟 (不传则自动计算)
+// - max_parallel: 上限 10
+// ============================================
+const MIN_DURATION_SECONDS = 300  // 最小时长 5 分钟
+
+app.post('/transcribe', authMiddleware, async (req, res) => {
+  const {
+    audio_url,
+    language = 'auto',
+    chunk_duration,      // 可选：不传则使用智能分块策略
+    max_parallel,        // 可选：不传则使用默认值 10
+    expected_duration    // 可选：预期时长（秒），用于快速校验
+  } = req.body
+
+  if (!audio_url) {
+    return res.status(400).json({ success: false, error: 'audio_url is required' })
+  }
+
+  if (!CF_ACCOUNT_ID || !CF_WORKERS_AI_TOKEN) {
+    return res.status(500).json({
+      success: false,
+      error: 'CF_ACCOUNT_ID and CF_WORKERS_AI_TOKEN must be configured'
+    })
+  }
+
+  // 如果前端传了预期时长，先快速校验
+  if (expected_duration && expected_duration < MIN_DURATION_SECONDS) {
+    return res.status(400).json({
+      success: false,
+      error: `音频时长不足 5 分钟 (${Math.floor(expected_duration / 60)}分钟)，不支持转录`,
+      code: 'DURATION_TOO_SHORT'
+    })
+  }
+
+  // 参数上限检查
+  const safeChunkDuration = chunk_duration 
+    ? Math.min(chunk_duration, MAX_CHUNK_DURATION) 
+    : null  // null 表示使用智能策略
+  const safeMaxParallel = Math.min(max_parallel || MAX_PARALLEL, MAX_PARALLEL)
+
+  // 生成任务 ID
+  const taskId = `trans_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  const now = Date.now()
+
+  // 初始化任务状态
+  transcriptionTasks.set(taskId, {
+    status: 'pending',
+    progress: 0,
+    message: '任务已创建，准备开始...',
+    audio_url,
+    language,
+    chunk_duration: safeChunkDuration,  // null 表示后续自动计算
+    max_parallel: safeMaxParallel,
+    created_at: now,
+    updated_at: now
+  })
+
+  console.log(`[Transcribe] 🎙️ Task created: ${taskId}`)
+
+  // 立即返回任务 ID
+  res.json({
+    success: true,
+    task_id: taskId,
+    message: '转录任务已创建'
+  })
+
+  // 后台执行转录
+  executeTranscriptionTask(taskId).catch(error => {
+    console.error(`[Transcribe] ❌ Task ${taskId} failed:`, error.message)
+  })
+})
+
+// ============================================
+// 🔍 查询异步转录任务状态
+// ============================================
+app.get('/transcribe-status/:task_id', authMiddleware, async (req, res) => {
+  const { task_id } = req.params
+
+  const task = transcriptionTasks.get(task_id)
+  if (!task) {
+    return res.status(404).json({
+      success: false,
+      error: 'Task not found or expired'
+    })
+  }
+
+  const response = {
+    success: true,
+    task_id,
+    status: task.status,
+    progress: task.progress,
+    message: task.message,
+    created_at: task.created_at,
+    updated_at: task.updated_at
+  }
+
+  // 完成时返回结果
+  if (task.status === 'completed') {
+    response.transcript = task.transcript
+    response.word_count = task.word_count
+    response.stats = task.stats
+  }
+
+  // 失败时返回错误
+  if (task.status === 'failed') {
+    response.error = task.error
+  }
+
+  res.json(response)
+})
+
+// ============================================
+// 🔧 异步转录执行函数
+// ============================================
+async function executeTranscriptionTask(taskId) {
+  const task = transcriptionTasks.get(taskId)
+  if (!task) return
+
+  const updateTask = (updates) => {
+    Object.assign(task, updates, { updated_at: Date.now() })
+    transcriptionTasks.set(taskId, task)
+  }
+
+  const startTime = Date.now()
+  const stats = { download: 0, probe: 0, split: 0, transcribe: 0, total: 0 }
+  let tempDir = null
+
+  try {
+    // 1. 下载音频
+    updateTask({ status: 'downloading', progress: 5, message: '正在下载音频文件...' })
+    console.log(`[Task ${taskId}] 📥 Downloading: ${task.audio_url}`)
+
+    const downloadStart = Date.now()
+    const audioBuffer = await downloadWithRetry(task.audio_url, {
+      timeout: 120000,  // 2 分钟超时（长音频文件大）
+      maxRetries: 3,
+      retryDelay: 3000
+    })
+
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'transcribe-async-'))
+    const inputPath = path.join(tempDir, 'input.audio')
+    await fs.writeFile(inputPath, audioBuffer)
+
+    stats.download = Date.now() - downloadStart
+    const fileSizeMB = (audioBuffer.length / 1024 / 1024).toFixed(2)
+    updateTask({ progress: 15, message: `下载完成 (${fileSizeMB} MB)` })
+    console.log(`[Task ${taskId}] ✅ Downloaded: ${fileSizeMB} MB`)
+
+    // 2. 获取音频时长
+    const probeStart = Date.now()
+    const { stdout: durationOutput } = await execAsync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`
+    )
+    const totalDuration = parseFloat(durationOutput.trim())
+    stats.probe = Date.now() - probeStart
+    console.log(`[Task ${taskId}] 📊 Duration: ${totalDuration.toFixed(1)}s`)
+
+    // 检查最小时长
+    if (totalDuration < MIN_DURATION_SECONDS) {
+      throw new Error(`音频时长不足 5 分钟 (${Math.floor(totalDuration / 60)}分${Math.floor(totalDuration % 60)}秒)，不支持转录`)
+    }
+
+    // 3. 计算分块策略
+    // 如果未指定 chunk_duration，使用智能分块策略
+    const chunkDuration = task.chunk_duration || calculateOptimalChunkDuration(totalDuration)
+    const chunkCount = Math.ceil(totalDuration / chunkDuration)
+    
+    console.log(`[Task ${taskId}] 📐 Chunk strategy: ${Math.floor(chunkDuration / 60)}min × ${chunkCount} chunks (total: ${Math.floor(totalDuration / 60)}min)`)
+
+    // 4. 切分音频
+    updateTask({ status: 'splitting', progress: 20, message: `正在切分音频 (${chunkCount}块)...` })
+    const splitStart = Date.now()
+
+    const chunks = []
+    for (let i = 0; i < chunkCount; i++) {
+      const chunkStart = i * chunkDuration
+      const outputPath = path.join(tempDir, `chunk_${i}.mp3`)
+      const ffmpegCmd = `ffmpeg -i "${inputPath}" -ss ${chunkStart} -t ${chunkDuration} -vn -acodec libmp3lame -q:a 4 "${outputPath}" -y 2>/dev/null`
+
+      try {
+        await execAsync(ffmpegCmd)
+        const chunkBuffer = await fs.readFile(outputPath)
+
+        if (chunkBuffer.length <= MAX_WHISPER_SIZE) {
+          chunks.push({
+            index: i,
+            start_time: chunkStart,
+            duration: Math.min(chunkDuration, totalDuration - chunkStart),
+            data: chunkBuffer.toString('base64'),
+            size: chunkBuffer.length
+          })
+        }
+      } catch (error) {
+        console.warn(`[Task ${taskId}] ⚠️ Chunk ${i + 1} failed:`, error.message)
+      }
+
+      // 更新切分进度
+      const splitProgress = 20 + Math.floor((i / chunkCount) * 10)
+      updateTask({ progress: splitProgress, message: `切分中 ${i + 1}/${chunkCount}` })
+    }
+
+    stats.split = Date.now() - splitStart
+    console.log(`[Task ${taskId}] ✅ Split: ${chunks.length} chunks`)
+
+    // 4. 并行转录
+    updateTask({ status: 'transcribing', progress: 30, message: '正在转录音频...' })
+    const transcribeStart = Date.now()
+    console.log(`[Task ${taskId}] 🎯 Transcribing ${chunks.length} chunks (parallel: ${task.max_parallel})`)
+
+    const transcripts = []
+    let completedChunks = 0
+
+    for (let i = 0; i < chunks.length; i += task.max_parallel) {
+      const batch = chunks.slice(i, i + task.max_parallel)
+
+      const batchResults = await Promise.all(
+        batch.map(async (chunk) => {
+          try {
+            const text = await callWhisperAPI(chunk.data, task.language)
+            return { index: chunk.index, text, success: true }
+          } catch (error) {
+            console.error(`[Task ${taskId}] ❌ Chunk ${chunk.index + 1} failed:`, error.message)
+            return { index: chunk.index, text: '', success: false }
+          }
+        })
+      )
+
+      transcripts.push(...batchResults)
+      completedChunks += batch.length
+
+      // 更新转录进度 (30% - 90%)
+      const transcribeProgress = 30 + Math.floor((completedChunks / chunks.length) * 60)
+      const successCount = transcripts.filter(t => t.success).length
+      updateTask({
+        progress: transcribeProgress,
+        message: `转录中 ${completedChunks}/${chunks.length} (成功: ${successCount})`
+      })
+    }
+
+    stats.transcribe = Date.now() - transcribeStart
+
+    // 5. 拼接结果
+    transcripts.sort((a, b) => a.index - b.index)
+    const fullTranscript = transcripts
+      .filter(t => t.text)
+      .map(t => t.text.trim())
+      .join('\n\n')
+
+    const wordCount = fullTranscript.length
+    const successCount = transcripts.filter(t => t.success).length
+    stats.total = Date.now() - startTime
+
+    console.log(`[Task ${taskId}] 🎉 Complete: ${wordCount} chars, ${successCount}/${chunks.length} chunks, ${stats.total}ms`)
+
+    // 6. 标记完成
+    updateTask({
+      status: 'completed',
+      progress: 100,
+      message: '转录完成',
+      transcript: fullTranscript,
+      word_count: wordCount,
+      stats: {
+        duration_seconds: totalDuration,
+        file_size_mb: parseFloat(fileSizeMB),
+        chunk_duration_seconds: chunkDuration,
+        chunk_count: chunks.length,
+        successful_chunks: successCount,
+        timing: stats
+      }
+    })
+
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+    console.error(`[Task ${taskId}] ❌ Failed:`, errorMsg)
+
+    updateTask({
+      status: 'failed',
+      progress: 0,
+      message: '转录失败',
+      error: errorMsg
+    })
+  } finally {
+    // 清理临时文件
+    if (tempDir) {
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true })
+      } catch (e) {
+        console.warn(`[Task ${taskId}] ⚠️ Cleanup failed:`, e.message)
+      }
+    }
+  }
+}
+
+// ============================================
 // 🚀 启动
 // ============================================
 app.listen(PORT, () => {
   console.log(`
-🎭 Playwright Dynamic Service v3.3
+🎭 Playwright Dynamic Service v3.6
 ===================================
 Port: ${PORT}
 Token: ${API_TOKEN.substring(0, 8)}...
 CF Account: ${CF_ACCOUNT_ID ? CF_ACCOUNT_ID.slice(0, 8) + '...' : 'NOT SET'}
 
+Audio Transcription Config:
+  Min Duration: ${MIN_DURATION_SECONDS / 60} min
+  Smart Chunking: ~${TARGET_CHUNK_COUNT} chunks (${MIN_CHUNK_DURATION / 60}-${MAX_CHUNK_DURATION / 60} min each)
+  Long Audio (≥${THRESHOLD_DURATION / 60}min): ${LONG_AUDIO_CHUNK / 60} min/chunk
+  Max Parallel: ${MAX_PARALLEL}
+
 Endpoints:
-  GET  /health       - 健康检查
-  POST /extract      - 🎯 动态规则提取 → Markdown
-  POST /content      - 📄 只返回 HTML
-  POST /screenshot   - 📸 截图 (PNG/JPEG)
-  POST /pdf          - 📑 导出 PDF (支持净化)
-  POST /chunk-audio  - 🎧 音频切分（FFmpeg）
-  POST /transcribe   - 🎙️ 完整音频转录（FFmpeg + Whisper）
+  GET  /health              - 健康检查
+  POST /extract             - 🎯 动态规则提取 → Markdown
+  POST /content             - 📄 只返回 HTML
+  POST /screenshot          - 📸 截图 (PNG/JPEG)
+  POST /pdf                 - 📑 导出 PDF (支持净化)
+  POST /chunk-audio         - 🎧 音频切分（FFmpeg）
+  POST /transcribe          - 🎙️ 音频转录（≥5分钟，智能分块）
+  GET  /transcribe-status   - 🔍 查询转录任务状态
 `)
 })

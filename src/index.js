@@ -31,6 +31,12 @@ const PORT = process.env.PORT || 3000
 // Token 认证
 const API_TOKEN = process.env.API_TOKEN || 'mindtalk-secret-2026'
 
+// Cloudflare Workers AI 配置（用于音频转录）
+const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID
+const CF_WORKERS_AI_TOKEN = process.env.CF_WORKERS_AI_TOKEN
+const WHISPER_MODEL = '@cf/openai/whisper-large-v3-turbo'
+const MAX_WHISPER_SIZE = 25 * 1024 * 1024  // Workers AI Whisper 限制 25MB
+
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 
@@ -39,7 +45,7 @@ app.use(express.json({ limit: '10mb' }))
 // ============================================
 function authMiddleware(req, res, next) {
   const token = req.query.token || req.headers['x-api-token']
-  
+
   if (token !== API_TOKEN) {
     return res.status(401).json({ success: false, error: 'Unauthorized' })
   }
@@ -66,7 +72,7 @@ async function getBrowser() {
 // ============================================
 function normalizeCookies(cookies, targetUrl) {
   if (!cookies || cookies.length === 0) return []
-  
+
   // 从 URL 提取默认 domain
   let defaultDomain = ''
   try {
@@ -75,7 +81,7 @@ function normalizeCookies(cookies, targetUrl) {
   } catch (e) {
     console.warn(`[Cookie] ⚠️ Cannot parse URL: ${targetUrl}`)
   }
-  
+
   const normalized = cookies
     .filter(c => c.name && c.value) // 过滤无效 cookie
     .map(c => {
@@ -88,7 +94,7 @@ function normalizeCookies(cookies, targetUrl) {
       if (domain && domain.startsWith('.')) {
         domain = domain.substring(1)
       }
-      
+
       return {
         name: c.name,
         value: c.value,
@@ -101,13 +107,13 @@ function normalizeCookies(cookies, targetUrl) {
       }
     })
     .filter(c => c.domain) // 过滤掉仍然没有 domain 的
-  
+
   if (normalized.length > 0 && normalized.length !== cookies.length) {
     console.log(`[Cookie] 🍪 Normalized ${normalized.length}/${cookies.length} cookies → domain: ${normalized[0].domain}`)
   } else if (normalized.length > 0) {
     console.log(`[Cookie] 🍪 ${normalized.length} cookies ready for domain: ${normalized[0].domain}`)
   }
-  
+
   return normalized
 }
 
@@ -115,11 +121,21 @@ function normalizeCookies(cookies, targetUrl) {
 // 📊 健康检查
 // ============================================
 app.get('/health', async (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  // 检查 FFmpeg 是否可用
+  let ffmpegVersion = null
+  try {
+    const { stdout } = await execAsync('ffmpeg -version | head -n 1')
+    ffmpegVersion = stdout.trim()
+  } catch (e) {
+    console.warn('[Health] ⚠️ FFmpeg not available')
+  }
+
+  res.json({
+    status: 'ok',
     service: 'playwright-cn',
-    version: '3.3.0',
+    version: '3.2.0',
     engine: 'playwright/chromium',
+    ffmpeg: ffmpegVersion ? 'available' : 'unavailable',
     time: new Date().toISOString()
   })
 })
@@ -134,35 +150,35 @@ app.get('/health', async (req, res) => {
 app.post('/extract', authMiddleware, async (req, res) => {
   const startTime = Date.now()
   const stats = { setup: 0, navigate: 0, scroll: 0, extract: 0, convert: 0, jscript: 0 }
-  
-  const { 
-    url, 
-    cookies, 
-    browser: browserConfig, 
-    extraction, 
-    markdown: markdownConfig, 
+
+  const {
+    url,
+    cookies,
+    browser: browserConfig,
+    extraction,
+    markdown: markdownConfig,
     metadata: metadataRules,
     extractionMode,  // NEW: 'dom' | 'jscript'
     customScript     // NEW: jscript 模式时的自定义脚本
   } = req.body
-  
+
   const mode = extractionMode || 'dom'
-  
+
   if (!url) {
     return res.status(400).json({ success: false, error: 'URL is required' })
   }
-  
+
   console.log(`[Extract] 🚀 Playwright Starting (mode: ${mode}): ${url}`)
-  
+
   let context = null
-  
+
   try {
     const setupStart = Date.now()
     const browser = await getBrowser()
-    
+
     // 🍪 规范化 cookies（确保 domain/path pair 完整）
     const normalizedCookies = normalizeCookies(cookies, url)
-    
+
     // 🎭 创建独立的浏览器上下文 (Context)
     context = await browser.newContext({
       userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42',
@@ -170,11 +186,11 @@ app.post('/extract', authMiddleware, async (req, res) => {
       isMobile: true,
       storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
-    
+
     const page = await context.newPage()
     stats.setup = Date.now() - setupStart
     console.log(`[Extract] 🎭 Setup complete (+${stats.setup}ms)`)
-    
+
     // ================================
     // 1️⃣ 导航到页面
     // ================================
@@ -183,15 +199,15 @@ app.post('/extract', authMiddleware, async (req, res) => {
       waitUntil: 'commit', // 相比 domcontentloaded 更快一点点
       timeout: 30000
     })
-    
+
     // 等待 domcontentloaded 或超时
     try {
       await page.waitForLoadState('domcontentloaded', { timeout: 10000 })
-    } catch (e) {}
-    
+    } catch (e) { }
+
     stats.navigate = Date.now() - navStart
     console.log(`[Extract] ✅ Navigation complete (+${stats.navigate}ms)`)
-    
+
     // 等待特定选择器
     const waitSelector = browserConfig?.waitForSelector || 'body'
     try {
@@ -199,26 +215,26 @@ app.post('/extract', authMiddleware, async (req, res) => {
     } catch (e) {
       console.log(`[Extract] ⚠️ Selector "${waitSelector}" not found`)
     }
-    
+
     // ================================
     // 🔀 根据模式分流处理
     // ================================
-    
+
     if (mode === 'jscript' && customScript) {
       // ================================
       // 📜 JScript 模式：只执行自定义脚本
       // ================================
-      
+
       // ⏳ 先等待 waitTime（让页面充分加载，避免 bot 检测）
       const waitTime = browserConfig?.waitTime || 0
       if (waitTime > 0) {
         console.log(`[Extract] ⏳ Waiting ${waitTime}ms before JScript...`)
         await page.waitForTimeout(waitTime)
       }
-      
+
       console.log('[Extract] 📜 JScript mode - executing custom script...')
       const jscriptStart = Date.now()
-      
+
       let scriptResult = null
       try {
         scriptResult = await page.evaluate(customScript)
@@ -226,12 +242,12 @@ app.post('/extract', authMiddleware, async (req, res) => {
         console.error('[Extract] ❌ JScript error:', e.message)
         scriptResult = { error: e.message }
       }
-      
+
       stats.jscript = Date.now() - jscriptStart
-      
+
       const duration = Date.now() - startTime
       console.log(`[Extract] 🎉 JScript Done in ${duration}ms`)
-      
+
       // 如果脚本返回了完整结果，直接使用
       if (scriptResult && !scriptResult.error) {
         res.json({
@@ -257,11 +273,11 @@ app.post('/extract', authMiddleware, async (req, res) => {
       }
       return
     }
-    
+
     // ================================
     // 🌐 DOM 模式：传统提取流程
     // ================================
-    
+
     // 2️⃣ 滚动加载
     const scrollStart = Date.now()
     if (browserConfig?.scrollToLoad !== false) {
@@ -283,29 +299,29 @@ app.post('/extract', authMiddleware, async (req, res) => {
         window.scrollTo(0, 0)
       })
     }
-    
+
     if (browserConfig?.waitTime) {
       await page.waitForTimeout(browserConfig.waitTime)
     }
     stats.scroll = Date.now() - scrollStart
-    
+
     // 3️⃣ 在浏览器内执行 DOM 提取
     const extractStart = Date.now()
-    
+
     const extractionRules = extraction || {
       contentSelectors: ['article', 'main', '.content', '.post', 'body'],
       removeSelectors: ['script', 'style', 'iframe', 'nav', 'footer', '.ads', '.ad-container', 'noscript']
     }
-    
+
     const extractResult = await page.evaluate((args) => {
       const { rules, metaRules } = args
       const result = { html: '', metadata: {} }
-      
+
       // 🧼 清理
       if (rules.removeSelectors) {
         rules.removeSelectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()))
       }
-      
+
       // 📋 Metadata
       const extractMeta = (fieldRules) => {
         if (!fieldRules || !Array.isArray(fieldRules)) return null
@@ -330,7 +346,7 @@ app.post('/extract', authMiddleware, async (req, res) => {
         }
         return null
       }
-      
+
       if (metaRules) {
         result.metadata = {
           title: extractMeta(metaRules.title) || document.title,
@@ -343,7 +359,7 @@ app.post('/extract', authMiddleware, async (req, res) => {
       } else {
         result.metadata = { title: document.title }
       }
-      
+
       // 🥩 正文
       let targetEl = null
       for (const s of rules.contentSelectors) {
@@ -351,24 +367,24 @@ app.post('/extract', authMiddleware, async (req, res) => {
         if (el && el.innerText?.trim().length > 100) { targetEl = el; break }
       }
       if (!targetEl) targetEl = document.body
-      
+
       // 处理图片
       targetEl.querySelectorAll('img').forEach(img => {
         const ds = img.getAttribute('data-src') || img.getAttribute('data-original')
         if (ds) img.setAttribute('src', ds)
       })
-      
+
       result.html = targetEl.innerHTML
       return result
     }, { rules: extractionRules, metaRules: metadataRules })
-    
+
     stats.extract = Date.now() - extractStart
-    
+
     // 4️⃣ Markdown 转换
     const convertStart = Date.now()
     const turndownService = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '-', hr: '---' })
     turndownService.remove(['script', 'style', 'noscript', 'iframe'])
-    
+
     const imageAttr = markdownConfig?.imageAttribute || 'src'
     if (imageAttr !== 'src') {
       turndownService.addRule('customImage', {
@@ -380,17 +396,17 @@ app.post('/extract', authMiddleware, async (req, res) => {
         }
       })
     }
-    
+
     let markdown = turndownService.turndown(extractResult.html)
     markdown = markdown.replace(/\n{3,}/g, '\n\n').trim()
     stats.convert = Date.now() - convertStart
-    
+
     // ================================
     // 📦 返回 DOM 模式结果
     // ================================
     const duration = Date.now() - startTime
     console.log(`[Extract] 🎉 DOM Done in ${duration}ms`)
-    
+
     res.json({
       success: true,
       markdown,
@@ -403,7 +419,7 @@ app.post('/extract', authMiddleware, async (req, res) => {
         steps: stats
       }
     })
-    
+
   } catch (error) {
     console.error(`[Extract] ❌ Playwright Error:`, error)
     res.status(500).json({ success: false, error: error.message, stats: { duration: Date.now() - startTime, steps: stats } })
@@ -418,7 +434,7 @@ app.post('/extract', authMiddleware, async (req, res) => {
 app.post('/content', authMiddleware, async (req, res) => {
   const { url, cookies, userAgent } = req.body
   if (!url) return res.status(400).json({ success: false, error: 'URL is required' })
-  
+
   let context = null
   try {
     const browser = await getBrowser()
@@ -427,10 +443,10 @@ app.post('/content', authMiddleware, async (req, res) => {
     })
     const page = await context.newPage()
     if (cookies) await context.addCookies(cookies)
-    
+
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
     const html = await page.content()
-    
+
     res.set('Content-Type', 'text/html; charset=utf-8')
     res.send(html)
   } catch (error) {
@@ -444,9 +460,9 @@ app.post('/content', authMiddleware, async (req, res) => {
 // 📸 截图接口
 // ============================================
 app.post('/screenshot', authMiddleware, async (req, res) => {
-  const { 
-    url, 
-    cookies, 
+  const {
+    url,
+    cookies,
     fullPage = false,        // 是否全页截图
     type = 'png',            // png 或 jpeg
     quality = 80,            // JPEG 质量 (1-100)
@@ -455,34 +471,34 @@ app.post('/screenshot', authMiddleware, async (req, res) => {
     extraction,              // 可选：清理规则（净化后再截图）
     browser: browserConfig
   } = req.body
-  
+
   if (!url) return res.status(400).json({ success: false, error: 'URL is required' })
-  
+
   console.log(`[Screenshot] 📸 Starting: ${url}`)
   const startTime = Date.now()
   let context = null
-  
+
   try {
     const browser = await getBrowser()
-    
+
     // 🍪 规范化 cookies
     const normalizedCookies = normalizeCookies(cookies, url)
-    
+
     context = await browser.newContext({
       userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
       viewport: viewport || { width: 375, height: 812 },
       isMobile: !viewport,
       storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
-    
+
     const page = await context.newPage()
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
-    
+
     // 等待页面稳定
     try {
       await page.waitForLoadState('networkidle', { timeout: 5000 })
-    } catch {}
-    
+    } catch { }
+
     // 🧹 如果有清理规则，先净化页面
     if (extraction?.removeSelectors) {
       await page.evaluate((selectors) => {
@@ -490,14 +506,14 @@ app.post('/screenshot', authMiddleware, async (req, res) => {
       }, extraction.removeSelectors)
       console.log(`[Screenshot] 🧹 Cleaned ${extraction.removeSelectors.length} selector types`)
     }
-    
+
     // 📸 截图
     const screenshotOptions = {
       type,
       fullPage,
       ...(type === 'jpeg' ? { quality } : {})
     }
-    
+
     let screenshot
     if (selector) {
       // 截取特定元素
@@ -509,14 +525,14 @@ app.post('/screenshot', authMiddleware, async (req, res) => {
     } else {
       screenshot = await page.screenshot(screenshotOptions)
     }
-    
+
     const duration = Date.now() - startTime
     console.log(`[Screenshot] ✅ Done in ${duration}ms, size: ${screenshot.length} bytes`)
-    
+
     res.set('Content-Type', type === 'jpeg' ? 'image/jpeg' : 'image/png')
     res.set('X-Duration-Ms', duration.toString())
     res.send(screenshot)
-    
+
   } catch (error) {
     console.error(`[Screenshot] ❌ Error:`, error)
     res.status(500).json({ success: false, error: error.message })
@@ -529,8 +545,8 @@ app.post('/screenshot', authMiddleware, async (req, res) => {
 // 📄 PDF 导出接口（支持净化）
 // ============================================
 app.post('/pdf', authMiddleware, async (req, res) => {
-  const { 
-    url, 
+  const {
+    url,
     cookies,
     format = 'A4',                    // 纸张大小：A4/Letter/Legal/Tabloid
     printBackground = true,           // 是否打印背景
@@ -543,34 +559,34 @@ app.post('/pdf', authMiddleware, async (req, res) => {
     extraction,                       // 🧹 清理规则（净化后再导出）
     browser: browserConfig
   } = req.body
-  
+
   if (!url) return res.status(400).json({ success: false, error: 'URL is required' })
-  
+
   console.log(`[PDF] 📄 Starting: ${url}`)
   const startTime = Date.now()
   let context = null
-  
+
   try {
     const browser = await getBrowser()
-    
+
     // 🍪 规范化 cookies
     const normalizedCookies = normalizeCookies(cookies, url)
-    
+
     // PDF 导出建议用桌面视口
     context = await browser.newContext({
       userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 800 },
       storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
-    
+
     const page = await context.newPage()
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
-    
+
     // 等待页面稳定
     try {
       await page.waitForLoadState('networkidle', { timeout: 8000 })
-    } catch {}
-    
+    } catch { }
+
     // 🧹 净化处理
     if (extraction) {
       // 移除不需要的元素
@@ -580,7 +596,7 @@ app.post('/pdf', authMiddleware, async (req, res) => {
         }, extraction.removeSelectors)
         console.log(`[PDF] 🧹 Removed elements: ${extraction.removeSelectors.join(', ')}`)
       }
-      
+
       // 如果指定了正文选择器，只保留正文
       if (extraction.contentSelectors?.length) {
         const isolated = await page.evaluate((selectors) => {
@@ -598,12 +614,12 @@ app.post('/pdf', authMiddleware, async (req, res) => {
           }
           return false
         }, extraction.contentSelectors)
-        
+
         if (isolated) {
           console.log(`[PDF] 🎯 Content isolated for clean PDF`)
         }
       }
-      
+
       // 处理图片懒加载
       await page.evaluate(() => {
         document.querySelectorAll('img').forEach(img => {
@@ -612,7 +628,7 @@ app.post('/pdf', authMiddleware, async (req, res) => {
         })
       })
     }
-    
+
     // 📄 生成 PDF
     const pdfOptions = {
       format,
@@ -624,21 +640,21 @@ app.post('/pdf', authMiddleware, async (req, res) => {
       ...(headerTemplate ? { headerTemplate } : {}),
       ...(footerTemplate ? { footerTemplate } : {})
     }
-    
+
     const pdf = await page.pdf(pdfOptions)
-    
+
     const duration = Date.now() - startTime
     console.log(`[PDF] ✅ Done in ${duration}ms, size: ${pdf.length} bytes`)
-    
+
     // 生成文件名
     const title = await page.title()
     const safeTitle = title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_').substring(0, 50) || 'document'
-    
+
     res.set('Content-Type', 'application/pdf')
     res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(safeTitle)}.pdf"`)
     res.set('X-Duration-Ms', duration.toString())
     res.send(pdf)
-    
+
   } catch (error) {
     console.error(`[PDF] ❌ Error:`, error)
     res.status(500).json({ success: false, error: error.message })
@@ -646,6 +662,332 @@ app.post('/pdf', authMiddleware, async (req, res) => {
     if (context) await context.close()
   }
 })
+
+// ============================================
+// 🎧 音频切分接口（FFmpeg）
+// 
+// 将长音频按时间切分成多个小段，用于 Whisper 转录
+// ============================================
+app.post('/chunk-audio', authMiddleware, async (req, res) => {
+  const {
+    audio_url,           // 音频文件 URL
+    chunk_duration = 120, // 每段时长（秒），默认 2 分钟
+    output_format = 'mp3' // 输出格式：mp3/wav/m4a
+  } = req.body
+
+  if (!audio_url) {
+    return res.status(400).json({ success: false, error: 'audio_url is required' })
+  }
+
+  console.log(`[ChunkAudio] 🎧 Starting: ${audio_url}, chunk: ${chunk_duration}s`)
+  const startTime = Date.now()
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'audio-chunk-'))
+
+  try {
+    // 1. 下载音频文件（针对国内服务器优化）
+    console.log(`[ChunkAudio] 📥 Downloading audio...`)
+    const audioBuffer = await downloadWithRetry(audio_url, {
+      timeout: 60000,
+      maxRetries: 3,
+      retryDelay: 2000
+    })
+    const inputPath = path.join(tempDir, `input.${output_format}`)
+    await fs.writeFile(inputPath, audioBuffer)
+    console.log(`[ChunkAudio] ✅ Downloaded: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`)
+
+    // 2. 获取音频总时长
+    const { stdout: durationOutput } = await execAsync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`
+    )
+    const totalDuration = parseFloat(durationOutput.trim())
+    const chunkCount = Math.ceil(totalDuration / chunk_duration)
+
+    console.log(`[ChunkAudio] 📊 Total duration: ${totalDuration.toFixed(1)}s, chunks: ${chunkCount}`)
+
+    // 3. 切分音频
+    const chunks = []
+    for (let i = 0; i < chunkCount; i++) {
+      const startTime = i * chunk_duration
+      const outputPath = path.join(tempDir, `chunk_${i + 1}.${output_format}`)
+
+      // FFmpeg 命令：从 startTime 开始，截取 chunk_duration 秒
+      const ffmpegCmd = `ffmpeg -i "${inputPath}" -ss ${startTime} -t ${chunk_duration} -c copy -avoid_negative_ts make_zero "${outputPath}" -y`
+
+      try {
+        await execAsync(ffmpegCmd)
+        const chunkBuffer = await fs.readFile(outputPath)
+        const chunkSize = chunkBuffer.length
+
+        // 转换为 Base64（或返回 URL，这里先返回 Base64）
+        const base64 = chunkBuffer.toString('base64')
+
+        chunks.push({
+          index: i + 1,
+          start_time: startTime,
+          duration: Math.min(chunk_duration, totalDuration - startTime),
+          size: chunkSize,
+          data: base64,  // Base64 编码的音频数据
+          mime_type: `audio/${output_format === 'm4a' ? 'mp4' : output_format}`
+        })
+
+        console.log(`[ChunkAudio] ✅ Chunk ${i + 1}/${chunkCount}: ${(chunkSize / 1024 / 1024).toFixed(2)} MB`)
+      } catch (error) {
+        console.error(`[ChunkAudio] ⚠️ Failed to create chunk ${i + 1}:`, error.message)
+        // 继续处理其他 chunk
+      }
+    }
+
+    const duration = Date.now() - startTime
+    console.log(`[ChunkAudio] 🎉 Done in ${duration}ms, ${chunks.length} chunks`)
+
+    res.json({
+      success: true,
+      total_duration: totalDuration,
+      chunk_duration,
+      chunk_count: chunks.length,
+      chunks,
+      stats: {
+        duration_ms: duration,
+        total_size_mb: (audioBuffer.length / 1024 / 1024).toFixed(2)
+      }
+    })
+
+  } catch (error) {
+    console.error(`[ChunkAudio] ❌ Error:`, error)
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stats: { duration_ms: Date.now() - startTime }
+    })
+  } finally {
+    // 清理临时文件
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true })
+    } catch (e) {
+      console.warn(`[ChunkAudio] ⚠️ Failed to cleanup temp dir:`, e.message)
+    }
+  }
+})
+
+// ============================================
+// 🎙️ 完整音频转录接口
+// 
+// 接受音频 URL，返回完整文字稿：
+// 1. 下载音频文件
+// 2. FFmpeg 按指定大小/时长切分
+// 3. 并行调用 Cloudflare Workers AI Whisper
+// 4. 按序拼接返回完整文字稿
+// ============================================
+app.post('/transcribe', authMiddleware, async (req, res) => {
+  const {
+    audio_url,
+    language = 'auto',           // 语言：zh/en/auto
+    chunk_size_mb = 20,          // 切分大小（MB），默认 20MB < 25MB 限制
+    chunk_duration = 120,        // 切分时长（秒），默认 2 分钟
+    max_parallel = 5             // 最大并行数
+  } = req.body
+
+  if (!audio_url) {
+    return res.status(400).json({ success: false, error: 'audio_url is required' })
+  }
+
+  if (!CF_ACCOUNT_ID || !CF_WORKERS_AI_TOKEN) {
+    return res.status(500).json({
+      success: false,
+      error: 'CF_ACCOUNT_ID and CF_WORKERS_AI_TOKEN must be configured'
+    })
+  }
+
+  console.log(`[Transcribe] 🎙️ Starting: ${audio_url}`)
+  const startTime = Date.now()
+  const stats = { download: 0, probe: 0, split: 0, transcribe: 0, total: 0 }
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'transcribe-'))
+
+  try {
+    // 1. 下载音频（针对国内服务器优化：超时 + 重试）
+    const downloadStart = Date.now()
+    console.log(`[Transcribe] 📥 Downloading audio...`)
+
+    const audioBuffer = await downloadWithRetry(audio_url, {
+      timeout: 60000,  // 60 秒超时
+      maxRetries: 3,   // 最多重试 3 次
+      retryDelay: 2000 // 重试间隔 2 秒
+    })
+    const inputPath = path.join(tempDir, 'input.audio')
+    await fs.writeFile(inputPath, audioBuffer)
+
+    stats.download = Date.now() - downloadStart
+    const fileSizeMB = (audioBuffer.length / 1024 / 1024).toFixed(2)
+    console.log(`[Transcribe] ✅ Downloaded: ${fileSizeMB} MB in ${stats.download}ms`)
+
+    // 2. 获取音频时长
+    const probeStart = Date.now()
+    const { stdout: durationOutput } = await execAsync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`
+    )
+    const totalDuration = parseFloat(durationOutput.trim())
+    stats.probe = Date.now() - probeStart
+    console.log(`[Transcribe] 📊 Duration: ${totalDuration.toFixed(1)}s`)
+
+    // 3. 切分音频
+    const splitStart = Date.now()
+    const chunkCount = Math.ceil(totalDuration / chunk_duration)
+    console.log(`[Transcribe] ✂️ Splitting into ${chunkCount} chunks (${chunk_duration}s each)...`)
+
+    const chunks = []
+    for (let i = 0; i < chunkCount; i++) {
+      const chunkStart = i * chunk_duration
+      const outputPath = path.join(tempDir, `chunk_${i}.mp3`)
+
+      // FFmpeg 切分：转为 mp3，控制质量
+      const ffmpegCmd = `ffmpeg -i "${inputPath}" -ss ${chunkStart} -t ${chunk_duration} -vn -acodec libmp3lame -q:a 4 "${outputPath}" -y 2>/dev/null`
+
+      try {
+        await execAsync(ffmpegCmd)
+        const chunkBuffer = await fs.readFile(outputPath)
+        const chunkSizeMB = chunkBuffer.length / 1024 / 1024
+
+        // 检查是否超过限制
+        if (chunkBuffer.length > MAX_WHISPER_SIZE) {
+          console.warn(`[Transcribe] ⚠️ Chunk ${i + 1} exceeds 25MB (${chunkSizeMB.toFixed(2)}MB), skipping...`)
+          continue
+        }
+
+        chunks.push({
+          index: i,
+          start_time: chunkStart,
+          duration: Math.min(chunk_duration, totalDuration - chunkStart),
+          data: chunkBuffer.toString('base64'),
+          size: chunkBuffer.length
+        })
+
+        console.log(`[Transcribe] ✅ Chunk ${i + 1}/${chunkCount}: ${chunkSizeMB.toFixed(2)} MB`)
+      } catch (error) {
+        console.error(`[Transcribe] ⚠️ Failed to create chunk ${i + 1}:`, error.message)
+      }
+    }
+
+    stats.split = Date.now() - splitStart
+    console.log(`[Transcribe] ✅ Split complete in ${stats.split}ms, ${chunks.length} valid chunks`)
+
+    // 4. 并行调用 Whisper
+    const transcribeStart = Date.now()
+    console.log(`[Transcribe] 🎯 Calling Whisper for ${chunks.length} chunks (parallel: ${max_parallel})...`)
+
+    const transcripts = await transcribeChunksParallel(chunks, language, max_parallel)
+    stats.transcribe = Date.now() - transcribeStart
+
+    // 5. 按序拼接
+    transcripts.sort((a, b) => a.index - b.index)
+    const fullTranscript = transcripts
+      .filter(t => t.text)
+      .map(t => t.text.trim())
+      .join('\n\n')
+
+    const wordCount = fullTranscript.length  // 中文按字符数
+    const successCount = transcripts.filter(t => t.success).length
+
+    stats.total = Date.now() - startTime
+    console.log(`[Transcribe] 🎉 Complete in ${stats.total}ms, ${wordCount} chars, ${successCount}/${chunks.length} chunks`)
+
+    res.json({
+      success: true,
+      transcript: fullTranscript,
+      word_count: wordCount,
+      language: language,
+      stats: {
+        duration_seconds: totalDuration,
+        file_size_mb: parseFloat(fileSizeMB),
+        chunk_count: chunks.length,
+        successful_chunks: successCount,
+        timing: stats
+      }
+    })
+
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+    console.error(`[Transcribe] ❌ Error:`, errorMsg)
+
+    res.status(500).json({
+      success: false,
+      error: errorMsg,
+      stats: { timing: stats, total: Date.now() - startTime }
+    })
+  } finally {
+    // 清理临时文件
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true })
+    } catch (e) {
+      console.warn(`[Transcribe] ⚠️ Failed to cleanup:`, e.message)
+    }
+  }
+})
+
+// ============================================
+// 并行调用 Whisper（控制并发度）
+// ============================================
+async function transcribeChunksParallel(chunks, language, maxParallel) {
+  const results = []
+
+  for (let i = 0; i < chunks.length; i += maxParallel) {
+    const batch = chunks.slice(i, i + maxParallel)
+
+    const batchResults = await Promise.all(
+      batch.map(async (chunk) => {
+        try {
+          const text = await callWhisperAPI(chunk.data, language)
+          return { index: chunk.index, text, success: true }
+        } catch (error) {
+          console.error(`[Whisper] ❌ Chunk ${chunk.index + 1} failed:`, error.message)
+          return { index: chunk.index, text: '', success: false, error: error.message }
+        }
+      })
+    )
+
+    results.push(...batchResults)
+    console.log(`[Whisper] 📊 Progress: ${Math.min(i + maxParallel, chunks.length)}/${chunks.length}`)
+  }
+
+  return results
+}
+
+// ============================================
+// 调用 Cloudflare Workers AI Whisper REST API
+// ============================================
+async function callWhisperAPI(base64Audio, language) {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${WHISPER_MODEL}`
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${CF_WORKERS_AI_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      audio: base64Audio,
+      task: 'transcribe',
+      language: language === 'auto' ? undefined : language,
+      vad_filter: true  // 启用 VAD 过滤，去除静音
+    })
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`Whisper API error: ${response.status} - ${errorText.slice(0, 200)}`)
+  }
+
+  const result = await response.json()
+
+  // Workers AI 响应格式
+  if (result.result && result.result.text) {
+    return result.result.text
+  }
+  if (result.text) {
+    return result.text
+  }
+
+  throw new Error('Unexpected Whisper API response format')
+}
 
 // ============================================
 // 🚀 启动
@@ -656,6 +998,7 @@ app.listen(PORT, () => {
 ===================================
 Port: ${PORT}
 Token: ${API_TOKEN.substring(0, 8)}...
+CF Account: ${CF_ACCOUNT_ID ? CF_ACCOUNT_ID.slice(0, 8) + '...' : 'NOT SET'}
 
 Endpoints:
   GET  /health       - 健康检查
@@ -663,5 +1006,7 @@ Endpoints:
   POST /content      - 📄 只返回 HTML
   POST /screenshot   - 📸 截图 (PNG/JPEG)
   POST /pdf          - 📑 导出 PDF (支持净化)
+  POST /chunk-audio  - 🎧 音频切分（FFmpeg）
+  POST /transcribe   - 🎙️ 完整音频转录（FFmpeg + Whisper）
 `)
 })

@@ -9,7 +9,7 @@ FROM node:20-bookworm-slim
 # 2. 设置工作目录
 WORKDIR /app
 
-# 3. 安装 Chromium 依赖
+# 3. 安装 Chromium 依赖 + FFmpeg（用于音频切分）
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     wget \
@@ -34,6 +34,7 @@ RUN apt-get update && \
     libxrandr2 \
     libxshmfence1 \
     xdg-utils \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # 4. 复制依赖描述并安装

@@ -8,6 +8,8 @@ services:
       - "3000:3000"
     environment:
       - API_TOKEN=${API_TOKEN:-mindtalk-secret-2026}
+      - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
+      - CF_WORKERS_AI_TOKEN=${CF_WORKERS_AI_TOKEN}
     restart: always
     shm_size: "2gb"
     healthcheck:

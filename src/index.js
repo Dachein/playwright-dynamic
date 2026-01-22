@@ -978,15 +978,20 @@ async function callWhisperAPI(base64Audio, language) {
 
   const result = await response.json()
 
-  // Workers AI 响应格式
-  if (result.result && result.result.text) {
-    return result.result.text
+  // CF Workers AI 响应格式: { result: { text: "...", transcription_info: {...}, ... }, success: true }
+  if (result.result && typeof result.result.text === 'string') {
+    return result.result.text  // 即使是空字符串也返回（可能没有检测到语音）
   }
+  
+  // 兼容其他格式
   if (result.text) {
     return result.text
   }
+  if (typeof result === 'string') {
+    return result
+  }
 
-  throw new Error('Unexpected Whisper API response format')
+  throw new Error(`Unexpected Whisper API response format: ${JSON.stringify(result).slice(0, 200)}`)
 }
 
 // ============================================

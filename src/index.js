@@ -856,7 +856,7 @@ app.post('/transcribe', authMiddleware, async (req, res) => {
     audio_url,
     language = 'auto',           // 语言：zh/en/auto
     chunk_size_mb = 20,          // 切分大小（MB），默认 20MB < 25MB 限制
-    chunk_duration = 300,        // 切分时长（秒），默认 5 分钟
+    chunk_duration = 120,        // 切分时长（秒），默认 2 分钟
     max_parallel = 5             // 最大并行数
   } = req.body
 

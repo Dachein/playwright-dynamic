@@ -41,6 +41,79 @@ app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 
 // ============================================
+// 下载工具函数（超时 + 重试，针对国内服务器优化）
+// ============================================
+async function downloadWithRetry(url, options = {}) {
+  const {
+    timeout = 60000,
+    maxRetries = 3,
+    retryDelay = 2000
+  } = options
+
+  let lastError = null
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[Download] Attempt ${attempt}/${maxRetries}...`)
+
+      // 使用 AbortController 实现超时
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), timeout)
+
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      })
+
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+
+      // 流式下载，避免一次性加载大文件到内存
+      const chunks = []
+      const reader = response.body.getReader()
+      let receivedLength = 0
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        chunks.push(value)
+        receivedLength += value.length
+      }
+
+      // 合并所有 chunks
+      const allChunks = new Uint8Array(receivedLength)
+      let position = 0
+      for (const chunk of chunks) {
+        allChunks.set(chunk, position)
+        position += chunk.length
+      }
+
+      console.log(`[Download] ✅ Success: ${(receivedLength / 1024 / 1024).toFixed(2)} MB`)
+      return Buffer.from(allChunks)
+
+    } catch (error) {
+      lastError = error
+      const isTimeout = error.name === 'AbortError' || error.message.includes('timeout')
+      const isNetworkError = error.message.includes('ECONNRESET') || error.message.includes('ETIMEDOUT')
+
+      if (attempt < maxRetries && (isTimeout || isNetworkError)) {
+        console.log(`[Download] ⚠️ Attempt ${attempt} failed: ${error.message}, retrying in ${retryDelay}ms...`)
+        await new Promise(resolve => setTimeout(resolve, retryDelay))
+      } else {
+        throw error
+      }
+    }
+  }
+
+  throw lastError || new Error('Download failed after all retries')
+}
+
+// ============================================
 // 🔐 认证中间件
 // ============================================
 function authMiddleware(req, res, next) {
@@ -671,7 +744,7 @@ app.post('/pdf', authMiddleware, async (req, res) => {
 app.post('/chunk-audio', authMiddleware, async (req, res) => {
   const {
     audio_url,           // 音频文件 URL
-    chunk_duration = 600, // 每段时长（秒），默认 10 分钟
+    chunk_duration = 120, // 每段时长（秒），默认 2 分钟
     output_format = 'mp3' // 输出格式：mp3/wav/m4a
   } = req.body
 
@@ -783,7 +856,7 @@ app.post('/transcribe', authMiddleware, async (req, res) => {
     audio_url,
     language = 'auto',           // 语言：zh/en/auto
     chunk_size_mb = 20,          // 切分大小（MB），默认 20MB < 25MB 限制
-    chunk_duration = 600,        // 切分时长（秒），默认 10 分钟
+    chunk_duration = 300,        // 切分时长（秒），默认 5 分钟
     max_parallel = 5             // 最大并行数
   } = req.body
 

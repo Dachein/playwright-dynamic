@@ -671,7 +671,7 @@ app.post('/pdf', authMiddleware, async (req, res) => {
 app.post('/chunk-audio', authMiddleware, async (req, res) => {
   const {
     audio_url,           // 音频文件 URL
-    chunk_duration = 120, // 每段时长（秒），默认 2 分钟
+    chunk_duration = 600, // 每段时长（秒），默认 10 分钟
     output_format = 'mp3' // 输出格式：mp3/wav/m4a
   } = req.body
 
@@ -783,7 +783,7 @@ app.post('/transcribe', authMiddleware, async (req, res) => {
     audio_url,
     language = 'auto',           // 语言：zh/en/auto
     chunk_size_mb = 20,          // 切分大小（MB），默认 20MB < 25MB 限制
-    chunk_duration = 120,        // 切分时长（秒），默认 2 分钟
+    chunk_duration = 600,        // 切分时长（秒），默认 10 分钟
     max_parallel = 5             // 最大并行数
   } = req.body
 

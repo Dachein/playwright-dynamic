@@ -25,8 +25,8 @@ const os = require('os')
 
 const execAsync = promisify(exec)
 
-// 🆕 读取 package.json 版本号
-const packageJson = require('./package.json')
+// 🆕 读取 package.json 版本号（package.json 在上一级目录）
+const packageJson = require('../package.json')
 const VERSION = packageJson.version || 'unknown'
 
 const app = express()

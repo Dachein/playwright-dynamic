@@ -1009,7 +1009,7 @@ app.post('/transcribe', authMiddleware, async (req, res) => {
   transcriptionTasks.set(taskId, {
     status: 'pending',
     progress: 0,
-    message: '任务已创建，准备开始...',
+    message: 'CODE:PENDING',
     audio_url,
     language,
     chunk_duration: safeChunkDuration,  // null 表示后续自动计算
@@ -1024,7 +1024,7 @@ app.post('/transcribe', authMiddleware, async (req, res) => {
   res.json({
     success: true,
     task_id: taskId,
-    message: '转录任务已创建'
+    message: 'Task created'
   })
 
   // 后台执行转录
@@ -1089,8 +1089,8 @@ async function executeTranscriptionTask(taskId) {
   let tempDir = null
 
   try {
-    // 1. 下载音频
-    updateTask({ status: 'downloading', progress: 5, message: '正在下载音频文件...' })
+    // 1. 下载音频 (0% - 20%)
+    updateTask({ status: 'downloading', progress: 5, message: 'CODE:LOADING' })
     console.log(`[Task ${taskId}] 📥 Downloading: ${task.audio_url}`)
 
     const downloadStart = Date.now()
@@ -1106,7 +1106,7 @@ async function executeTranscriptionTask(taskId) {
 
     stats.download = Date.now() - downloadStart
     const fileSizeMB = (audioBuffer.length / 1024 / 1024).toFixed(2)
-    updateTask({ progress: 15, message: `下载完成 (${fileSizeMB} MB)` })
+    updateTask({ progress: 20, message: 'CODE:LOADING' })
     console.log(`[Task ${taskId}] ✅ Downloaded: ${fileSizeMB} MB`)
 
     // 2. 获取音频时长
@@ -1130,77 +1130,116 @@ async function executeTranscriptionTask(taskId) {
     
     console.log(`[Task ${taskId}] 📐 Chunk strategy: ${Math.floor(chunkDuration / 60)}min × ${chunkCount} chunks (total: ${Math.floor(totalDuration / 60)}min)`)
 
-    // 4. 切分音频
-    updateTask({ status: 'splitting', progress: 20, message: `正在切分音频 (${chunkCount}块)...` })
-    const splitStart = Date.now()
+    // ============================================
+    // 🎯 流水线模式：随切随送，并发控制
+    // 进度权重：切分 20-50%，转录 50-90%
+    // ============================================
+    
+    updateTask({ status: 'splitting', progress: 20, message: `CODE:SPLITTING|0|${chunkCount}` })
+    const pipelineStart = Date.now()
+    
+    const maxParallel = task.max_parallel || 10
+    const transcripts = []           // 存放转录结果
+    const activeTranscriptions = []  // 当前正在进行的转录任务
+    let splitCount = 0               // 已切分完成的数量
+    let transcribeCount = 0          // 已转录完成的数量
+    let successCount = 0             // 转录成功的数量
+    
+    console.log(`[Task ${taskId}] 🎯 Pipeline mode: split & transcribe (parallel: ${maxParallel})`)
 
-    const chunks = []
+    // 🎯 转录单个切片的函数
+    const transcribeChunk = async (chunk) => {
+      try {
+        const text = await callWhisperAPI(chunk.data, task.language)
+        return { index: chunk.index, text, success: true }
+      } catch (error) {
+        console.error(`[Task ${taskId}] ❌ Chunk ${chunk.index + 1} transcribe failed:`, error.message)
+        return { index: chunk.index, text: '', success: false }
+      }
+    }
+
+    // 🎯 处理转录完成的回调
+    const onTranscribeComplete = (result) => {
+      transcripts.push(result)
+      transcribeCount++
+      if (result.success) successCount++
+      
+      // 下半场进度：50% + (已完成/总数) * 40%
+      if (splitCount >= chunkCount) {
+        const transcribeProgress = 50 + Math.floor((transcribeCount / chunkCount) * 40)
+        updateTask({
+          status: 'transcribing',
+          progress: transcribeProgress,
+          message: `CODE:TRANSCRIBING|${transcribeCount}|${chunkCount}|${successCount}`
+        })
+      }
+    }
+
+    // 🎯 流水线主循环：边切边送
     for (let i = 0; i < chunkCount; i++) {
       const chunkStart = i * chunkDuration
       const outputPath = path.join(tempDir, `chunk_${i}.mp3`)
       const ffmpegCmd = `ffmpeg -i "${inputPath}" -ss ${chunkStart} -t ${chunkDuration} -vn -acodec libmp3lame -q:a 4 "${outputPath}" -y 2>/dev/null`
 
       try {
+        // 切分当前片段
         await execAsync(ffmpegCmd)
         const chunkBuffer = await fs.readFile(outputPath)
 
         if (chunkBuffer.length <= MAX_WHISPER_SIZE) {
-          chunks.push({
+          const chunk = {
             index: i,
             start_time: chunkStart,
             duration: Math.min(chunkDuration, totalDuration - chunkStart),
             data: chunkBuffer.toString('base64'),
             size: chunkBuffer.length
-          })
+          }
+
+          // 🎯 如果并发队列已满，等待任意一个完成
+          if (activeTranscriptions.length >= maxParallel) {
+            const completed = await Promise.race(activeTranscriptions)
+            onTranscribeComplete(completed)
+            // 从活跃列表中移除已完成的任务
+            const idx = activeTranscriptions.findIndex(p => p === completed)
+            if (idx !== -1) activeTranscriptions.splice(idx, 1)
+          }
+
+          // 🎯 立即发送转录任务（不等待）
+          const transcriptionPromise = transcribeChunk(chunk)
+          activeTranscriptions.push(transcriptionPromise)
+          
+          // 清理已用完的 buffer，释放内存
+          chunk.data = null
         }
       } catch (error) {
-        console.warn(`[Task ${taskId}] ⚠️ Chunk ${i + 1} failed:`, error.message)
+        console.warn(`[Task ${taskId}] ⚠️ Chunk ${i + 1} split failed:`, error.message)
       }
 
-      // 更新切分进度
-      const splitProgress = 20 + Math.floor((i / chunkCount) * 10)
-      updateTask({ progress: splitProgress, message: `切分中 ${i + 1}/${chunkCount}` })
+      splitCount++
+      
+      // 上半场进度：20% + (已切分/总数) * 30%
+      const splitProgress = 20 + Math.floor((splitCount / chunkCount) * 30)
+      updateTask({ progress: splitProgress, message: `CODE:SPLITTING|${splitCount}|${chunkCount}` })
     }
 
-    stats.split = Date.now() - splitStart
-    console.log(`[Task ${taskId}] ✅ Split: ${chunks.length} chunks`)
+    // 🎯 切分全部完成，等待剩余的转录任务
+    console.log(`[Task ${taskId}] ✅ Split complete: ${splitCount} chunks, waiting for ${activeTranscriptions.length} transcriptions...`)
+    
+    // 切换到下半场：从 50% 开始算转录进度
+    updateTask({ 
+      status: 'transcribing', 
+      progress: 50 + Math.floor((transcribeCount / chunkCount) * 40),
+      message: `CODE:TRANSCRIBING|${transcribeCount}|${chunkCount}|${successCount}` 
+    })
 
-    // 4. 并行转录
-    updateTask({ status: 'transcribing', progress: 30, message: '正在转录音频...' })
-    const transcribeStart = Date.now()
-    console.log(`[Task ${taskId}] 🎯 Transcribing ${chunks.length} chunks (parallel: ${task.max_parallel})`)
+    // 等待所有剩余的转录任务完成
+    const remainingResults = await Promise.all(activeTranscriptions)
+    remainingResults.forEach(onTranscribeComplete)
 
-    const transcripts = []
-    let completedChunks = 0
-
-    for (let i = 0; i < chunks.length; i += task.max_parallel) {
-      const batch = chunks.slice(i, i + task.max_parallel)
-
-      const batchResults = await Promise.all(
-        batch.map(async (chunk) => {
-          try {
-            const text = await callWhisperAPI(chunk.data, task.language)
-            return { index: chunk.index, text, success: true }
-          } catch (error) {
-            console.error(`[Task ${taskId}] ❌ Chunk ${chunk.index + 1} failed:`, error.message)
-            return { index: chunk.index, text: '', success: false }
-          }
-        })
-      )
-
-      transcripts.push(...batchResults)
-      completedChunks += batch.length
-
-      // 更新转录进度 (30% - 90%)
-      const transcribeProgress = 30 + Math.floor((completedChunks / chunks.length) * 60)
-      const successCount = transcripts.filter(t => t.success).length
-      updateTask({
-        progress: transcribeProgress,
-        message: `转录中 ${completedChunks}/${chunks.length} (成功: ${successCount})`
-      })
-    }
-
-    stats.transcribe = Date.now() - transcribeStart
+    stats.split = Date.now() - pipelineStart
+    stats.transcribe = stats.split // 流水线模式下两者重叠
+    
+    console.log(`[Task ${taskId}] ✅ Pipeline complete: ${successCount}/${chunkCount} successful`)
 
     // 5. 拼接结果
     transcripts.sort((a, b) => a.index - b.index)
@@ -1219,14 +1258,14 @@ async function executeTranscriptionTask(taskId) {
     updateTask({
       status: 'completed',
       progress: 100,
-      message: '转录完成',
+      message: 'CODE:COMPLETED',
       transcript: fullTranscript,
       word_count: wordCount,
       stats: {
         duration_seconds: totalDuration,
         file_size_mb: parseFloat(fileSizeMB),
         chunk_duration_seconds: chunkDuration,
-        chunk_count: chunks.length,
+        chunk_count: chunkCount,
         successful_chunks: successCount,
         timing: stats
       }
@@ -1239,7 +1278,7 @@ async function executeTranscriptionTask(taskId) {
     updateTask({
       status: 'failed',
       progress: 0,
-      message: '转录失败',
+      message: 'CODE:FAILED',
       error: errorMsg
     })
   } finally {

@@ -1,12 +1,12 @@
-# syntax=docker/dockerfile:1.4
 # 🎭 Playwright-Dynamic 旗舰版
 # 
 # 构建: docker build -t playwright-dynamic .
 # 运行: docker run -d -p 3000:3000 -e API_TOKEN=xxx playwright-dynamic
 # 
-# 💡 使用 BuildKit 缓存加速构建：
-#    DOCKER_BUILDKIT=1 docker build -t playwright-dynamic .
-#    或 export DOCKER_BUILDKIT=1 后使用 docker-compose
+# 💡 Docker 层缓存说明：
+#    - 如果只改了 src/ 下的代码，不会重新下载 npm 依赖和 Playwright
+#    - 如果 package.json 没变，npm install 会使用缓存层（秒级完成）
+#    - 如果支持 BuildKit，可以启用缓存挂载进一步加速
 
 # 1. 使用轻量级 Node 基础镜像
 FROM node:20-bookworm-slim
@@ -49,18 +49,16 @@ RUN npm config set registry https://registry.npmmirror.com
 # 只有 package*.json 变化时才会重新执行 npm install
 COPY package*.json ./
 
-# 使用 BuildKit 缓存挂载，加速 npm install（即使 package.json 没变也会复用缓存）
-# 语法：# syntax=docker/dockerfile:1.4
-RUN --mount=type=cache,target=/root/.npm \
-    npm install --omit=dev
+# 安装 npm 依赖
+# 如果有 BuildKit，会使用缓存挂载加速；如果没有，也能正常工作
+RUN npm install --omit=dev
 
 # 6. 配置 Playwright 使用国内镜像源（加速浏览器下载）
 ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
 
-# 7. 安装 Playwright Chromium 浏览器（利用缓存挂载）
-# 使用 BuildKit 缓存，避免每次都重新下载 Chromium（164MB）
-RUN --mount=type=cache,target=/root/.cache/ms-playwright \
-    npx playwright install chromium
+# 7. 安装 Playwright Chromium 浏览器
+# 如果有 BuildKit，会使用缓存挂载；如果没有，也能正常工作
+RUN npx playwright install chromium
 
 # 7. 复制源代码
 COPY src ./src

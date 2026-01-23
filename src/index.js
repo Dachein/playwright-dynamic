@@ -225,7 +225,7 @@ app.get('/health', async (req, res) => {
   res.json({
     status: 'ok',
     service: 'playwright-cn',
-    version: '3.6.0',
+    version: '3.7.0',
     engine: 'playwright/chromium',
     ffmpeg: ffmpegVersion ? 'available' : 'unavailable',
     transcription: {

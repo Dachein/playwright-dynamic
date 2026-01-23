@@ -25,6 +25,10 @@ const os = require('os')
 
 const execAsync = promisify(exec)
 
+// 🆕 读取 package.json 版本号
+const packageJson = require('./package.json')
+const VERSION = packageJson.version || 'unknown'
+
 const app = express()
 const PORT = process.env.PORT || 3000
 
@@ -225,7 +229,7 @@ app.get('/health', async (req, res) => {
   res.json({
     status: 'ok',
     service: 'playwright-cn',
-    version: '3.7.0',
+    version: VERSION,
     engine: 'playwright/chromium',
     ffmpeg: ffmpegVersion ? 'available' : 'unavailable',
     transcription: {

@@ -4,8 +4,8 @@ services:
   playwright:
     build:
       context: .
-      # 启用 BuildKit 缓存挂载，加速构建（npm 和 playwright 下载会被缓存）
-      # 如果只改了 src/ 下的代码，不会重新下载依赖
+      # 使用传统 Docker 构建（兼容旧版本，不依赖 buildx）
+      # Docker 层缓存仍然有效：只改 src/ 时不会重新下载依赖
     container_name: playwright-dynamic
     ports:
       - "3000:3000"

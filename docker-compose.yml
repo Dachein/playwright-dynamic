@@ -2,7 +2,10 @@ version: "3.8"
 
 services:
   playwright:
-    build: .
+    build:
+      context: .
+      # 启用 BuildKit 缓存挂载，加速构建（npm 和 playwright 下载会被缓存）
+      # 如果只改了 src/ 下的代码，不会重新下载依赖
     container_name: playwright-dynamic
     ports:
       - "3000:3000"

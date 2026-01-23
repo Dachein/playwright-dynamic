@@ -37,11 +37,20 @@ RUN apt-get update && \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. 复制依赖描述并安装
+# 4. 配置 npm 国内镜像源（加速依赖安装）
+RUN npm config set registry https://registry.npmmirror.com
+
+# 5. 复制依赖描述并安装
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# 5. 安装 Playwright Chromium 浏览器
+# 6. 配置 Playwright 使用国内镜像源（加速浏览器下载）
+# 使用 npm 镜像的 Playwright 下载源（npmmirror.com 提供 Playwright 镜像）
+ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+
+# 7. 安装 Playwright Chromium 浏览器
+# 如果镜像源不可用，可以注释掉上面的 ENV，使用默认源（但会很慢）
+# 或者配置代理：ENV HTTP_PROXY=http://proxy:port HTTPS_PROXY=http://proxy:port
 RUN npx playwright install chromium
 
 # 7. 复制源代码

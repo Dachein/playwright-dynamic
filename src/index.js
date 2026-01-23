@@ -1249,7 +1249,7 @@ async function executeTranscriptionTask(taskId) {
       .join('\n\n')
 
     const wordCount = fullTranscript.length
-    const successCount = transcripts.filter(t => t.success).length
+    successCount = transcripts.filter(t => t.success).length  // 重新计算确保准确
     stats.total = Date.now() - startTime
 
     console.log(`[Task ${taskId}] 🎉 Complete: ${wordCount} chars, ${successCount}/${chunks.length} chunks, ${stats.total}ms`)

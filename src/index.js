@@ -296,11 +296,9 @@ app.post('/extract', authMiddleware, async (req, res) => {
       isMobile,
       storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
-
-    const page = await context.newPage()
     
-    // 🎭 反检测：覆盖 navigator.webdriver 和其他自动化特征
-    await page.addInitScript(() => {
+    // 🎭 反检测：在 context 级别注入脚本（所有页面都会应用）
+    await context.addInitScript(() => {
       // 1. 隐藏 webdriver 属性
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
       
@@ -323,6 +321,8 @@ app.post('/extract', authMiddleware, async (req, res) => {
         window.chrome = { runtime: {} }
       }
     })
+
+    const page = await context.newPage()
     stats.setup = Date.now() - setupStart
     console.log(`[Extract] 🎭 Setup complete (+${stats.setup}ms)`)
 

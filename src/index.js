@@ -156,7 +156,9 @@ async function getBrowser() {
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage'
+        '--disable-dev-shm-usage',
+        // 🎭 反检测：禁用自动化控制特征
+        '--disable-blink-features=AutomationControlled'
       ]
     })
   }
@@ -283,14 +285,44 @@ app.post('/extract', authMiddleware, async (req, res) => {
     const normalizedCookies = normalizeCookies(cookies, url)
 
     // 🎭 创建独立的浏览器上下文 (Context)
+    // 默认使用 Chrome Desktop UA（更自然的指纹）
+    const defaultUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    const userAgent = browserConfig?.userAgent || defaultUA
+    const isMobile = browserConfig?.isMobile ?? false  // 默认桌面模式
+    
     context = await browser.newContext({
-      userAgent: browserConfig?.userAgent || 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42',
-      viewport: { width: 375, height: 812 },
-      isMobile: true,
+      userAgent,
+      viewport: isMobile ? { width: 375, height: 812 } : { width: 1920, height: 1080 },
+      isMobile,
       storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
 
     const page = await context.newPage()
+    
+    // 🎭 反检测：覆盖 navigator.webdriver 和其他自动化特征
+    await page.addInitScript(() => {
+      // 1. 隐藏 webdriver 属性
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+      
+      // 2. 模拟真实的 plugins 数组
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin' }
+        ]
+      })
+      
+      // 3. 模拟真实的 languages
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en', 'zh-CN', 'zh']
+      })
+      
+      // 4. 添加 window.chrome 对象（Chrome 特有）
+      if (!window.chrome) {
+        window.chrome = { runtime: {} }
+      }
+    })
     stats.setup = Date.now() - setupStart
     console.log(`[Extract] 🎭 Setup complete (+${stats.setup}ms)`)
 
@@ -328,7 +360,7 @@ app.post('/extract', authMiddleware, async (req, res) => {
       // 📜 JScript 模式：只执行自定义脚本
       // ================================
 
-      // ⏳ 先等待 waitTime（让页面充分加载，避免 bot 检测）
+      // ⏳ 先等待 waitTime（让页面充分加载）
       const waitTime = browserConfig?.waitTime || 0
       if (waitTime > 0) {
         console.log(`[Extract] ⏳ Waiting ${waitTime}ms before JScript...`)

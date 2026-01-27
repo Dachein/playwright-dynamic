@@ -228,10 +228,20 @@ app.get('/health', async (req, res) => {
     console.warn('[Health] ⚠️ FFmpeg not available')
   }
 
+  // 获取 Git commit hash（用于版本追踪）
+  let gitCommit = null
+  try {
+    const { stdout } = await execAsync('git rev-parse --short HEAD')
+    gitCommit = stdout.trim()
+  } catch (e) {
+    // Git 不可用时忽略（如 Docker 镜像中可能没有 git）
+  }
+
   res.json({
     status: 'ok',
     service: 'playwright-cn',
     version: VERSION,
+    commit: gitCommit,  // 🆕 Git commit hash
     engine: 'playwright/chromium',
     ffmpeg: ffmpegVersion ? 'available' : 'unavailable',
     transcription: {

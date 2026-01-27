@@ -31,18 +31,14 @@ echo "API_TOKEN=mindtalk-secret-2026" >> .env
 当你发现代码有更新，或者需要重启服务时，执行以下“黄金组合”：
 
 ```bash
-# ⚡ 启用 BuildKit 缓存（推荐，加速构建）
-export DOCKER_BUILDKIT=1
-
-# 勾取最新代码 -> 自动构建镜像 -> 重启受影响的容器
+# 拉取最新代码 -> 自动构建镜像 -> 重启受影响的容器
 # 💡 如果只改了 src/ 下的代码，不会重新下载 npm 依赖和 Playwright Chromium
 git pull origin main && docker-compose up -d --build
 ```
 
 **💡 构建加速原理：**
 - Docker 会缓存每一层，只有 `package.json` 变化时才重新 `npm install`
-- 使用 BuildKit 缓存挂载，即使重新安装也会从缓存读取（秒级完成）
-- 如果只改了 `src/index.js`，构建时间从 5-10 分钟降到 10-30 秒
+- 如果只改了 `src/index.js`，构建时间会显著缩短（利用 Docker 层缓存）
 
 ---
 

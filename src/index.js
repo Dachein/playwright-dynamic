@@ -289,19 +289,19 @@ app.post('/extract', authMiddleware, async (req, res) => {
     const defaultUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     const userAgent = browserConfig?.userAgent || defaultUA
     const isMobile = browserConfig?.isMobile ?? false  // 默认桌面模式
-    
+
     context = await browser.newContext({
       userAgent,
       viewport: isMobile ? { width: 375, height: 812 } : { width: 1920, height: 1080 },
       isMobile,
       storageState: normalizedCookies.length > 0 ? { cookies: normalizedCookies } : undefined
     })
-    
+
     // 🎭 反检测：在 context 级别注入脚本（所有页面都会应用）
     await context.addInitScript(() => {
       // 1. 隐藏 webdriver 属性
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
-      
+
       // 2. 模拟真实的 plugins 数组
       Object.defineProperty(navigator, 'plugins', {
         get: () => [
@@ -310,12 +310,12 @@ app.post('/extract', authMiddleware, async (req, res) => {
           { name: 'Native Client', filename: 'internal-nacl-plugin' }
         ]
       })
-      
+
       // 3. 模拟真实的 languages
       Object.defineProperty(navigator, 'languages', {
         get: () => ['en-US', 'en', 'zh-CN', 'zh']
       })
-      
+
       // 4. 添加 window.chrome 对象（Chrome 特有）
       if (!window.chrome) {
         window.chrome = { runtime: {} }
@@ -603,6 +603,7 @@ app.post('/screenshot', authMiddleware, async (req, res) => {
     quality = 80,            // JPEG 质量 (1-100)
     selector,                // 可选：只截取某个元素
     viewport,                // 可选：自定义视口 { width, height }
+    clip,                    // 可选：裁剪区域 { x, y, width, height }，相对于 selector 元素或页面
     extraction,              // 可选：清理规则（净化后再截图）
     browser: browserConfig
   } = req.body
@@ -634,6 +635,19 @@ app.post('/screenshot', authMiddleware, async (req, res) => {
       await page.waitForLoadState('networkidle', { timeout: 5000 })
     } catch { }
 
+    // ⏳ 等待特定选择器（如 PDF.js 渲染完成标记）
+    if (browserConfig?.waitForSelector) {
+      try {
+        await page.waitForSelector(browserConfig.waitForSelector, { 
+          state: 'attached', 
+          timeout: browserConfig?.waitTimeout || 15000 
+        })
+        console.log(`[Screenshot] ✅ Selector "${browserConfig.waitForSelector}" found`)
+      } catch (e) {
+        console.log(`[Screenshot] ⚠️ Selector "${browserConfig.waitForSelector}" timeout`)
+      }
+    }
+
     // 🧹 如果有清理规则，先净化页面
     if (extraction?.removeSelectors) {
       await page.evaluate((selectors) => {
@@ -650,13 +664,35 @@ app.post('/screenshot', authMiddleware, async (req, res) => {
     }
 
     let screenshot
-    if (selector) {
-      // 截取特定元素
+    if (selector && clip) {
+      // 🎯 有 selector + clip：定位元素后裁剪指定区域
+      const element = await page.$(selector)
+      if (!element) {
+        return res.status(400).json({ success: false, error: `Selector "${selector}" not found` })
+      }
+      const box = await element.boundingBox()
+      if (!box) {
+        return res.status(400).json({ success: false, error: `Cannot get bounding box for "${selector}"` })
+      }
+      // clip 坐标相对于元素，转换为页面绝对坐标
+      const absoluteClip = {
+        x: box.x + (clip.x || 0),
+        y: box.y + (clip.y || 0),
+        width: clip.width || box.width,
+        height: clip.height || box.height
+      }
+      console.log(`[Screenshot] 📐 Clip: element at (${box.x}, ${box.y}), clip to (${absoluteClip.x}, ${absoluteClip.y}, ${absoluteClip.width}x${absoluteClip.height})`)
+      screenshot = await page.screenshot({ ...screenshotOptions, clip: absoluteClip })
+    } else if (selector) {
+      // 截取特定元素（完整）
       const element = await page.$(selector)
       if (!element) {
         return res.status(400).json({ success: false, error: `Selector "${selector}" not found` })
       }
       screenshot = await element.screenshot(screenshotOptions)
+    } else if (clip) {
+      // 只有 clip，相对于页面裁剪
+      screenshot = await page.screenshot({ ...screenshotOptions, clip })
     } else {
       screenshot = await page.screenshot(screenshotOptions)
     }
@@ -935,14 +971,14 @@ function calculateOptimalChunkDuration(totalDuration) {
     // 超过 100 分钟：固定 10 分钟一块
     return LONG_AUDIO_CHUNK
   }
-  
+
   // 少于 100 分钟：动态计算，目标 10 个块
   let chunkDuration = Math.ceil(totalDuration / TARGET_CHUNK_COUNT)
-  
+
   // 确保在 [2分钟, 15分钟] 范围内
   chunkDuration = Math.max(MIN_CHUNK_DURATION, chunkDuration)
   chunkDuration = Math.min(MAX_CHUNK_DURATION, chunkDuration)
-  
+
   return chunkDuration
 }
 
@@ -977,7 +1013,7 @@ async function callWhisperAPI(base64Audio, language) {
   if (result.result && typeof result.result.text === 'string') {
     return result.result.text  // 即使是空字符串也返回（可能没有检测到语音）
   }
-  
+
   // 兼容其他格式
   if (result.text) {
     return result.text
@@ -1032,8 +1068,8 @@ app.post('/transcribe', authMiddleware, async (req, res) => {
   }
 
   // 参数上限检查
-  const safeChunkDuration = chunk_duration 
-    ? Math.min(chunk_duration, MAX_CHUNK_DURATION) 
+  const safeChunkDuration = chunk_duration
+    ? Math.min(chunk_duration, MAX_CHUNK_DURATION)
     : null  // null 表示使用智能策略
   const safeMaxParallel = Math.min(max_parallel || MAX_PARALLEL, MAX_PARALLEL)
 
@@ -1163,24 +1199,24 @@ async function executeTranscriptionTask(taskId) {
     // 如果未指定 chunk_duration，使用智能分块策略
     const chunkDuration = task.chunk_duration || calculateOptimalChunkDuration(totalDuration)
     const chunkCount = Math.ceil(totalDuration / chunkDuration)
-    
+
     console.log(`[Task ${taskId}] 📐 Chunk strategy: ${Math.floor(chunkDuration / 60)}min × ${chunkCount} chunks (total: ${Math.floor(totalDuration / 60)}min)`)
 
     // ============================================
     // 🎯 流水线模式：随切随送，并发控制
     // 进度权重：切分 20-50%，转录 50-90%
     // ============================================
-    
+
     updateTask({ status: 'splitting', progress: 20, message: `CODE:SPLITTING|0|${chunkCount}` })
     const pipelineStart = Date.now()
-    
+
     const maxParallel = task.max_parallel || 10
     const transcripts = []           // 存放转录结果
     const activeTranscriptions = []  // 当前正在进行的转录任务
     let splitCount = 0               // 已切分完成的数量
     let transcribeCount = 0          // 已转录完成的数量
     let successCount = 0             // 转录成功的数量
-    
+
     console.log(`[Task ${taskId}] 🎯 Pipeline mode: split & transcribe (parallel: ${maxParallel})`)
 
     // 🎯 转录单个切片的函数
@@ -1199,7 +1235,7 @@ async function executeTranscriptionTask(taskId) {
       transcripts.push(result)
       transcribeCount++
       if (result.success) successCount++
-      
+
       // 下半场进度：50% + (已完成/总数) * 40%
       if (splitCount >= chunkCount) {
         const transcribeProgress = 50 + Math.floor((transcribeCount / chunkCount) * 40)
@@ -1243,7 +1279,7 @@ async function executeTranscriptionTask(taskId) {
           // 🎯 立即发送转录任务（不等待）
           const transcriptionPromise = transcribeChunk(chunk)
           activeTranscriptions.push(transcriptionPromise)
-          
+
           // 清理已用完的 buffer，释放内存
           chunk.data = null
         }
@@ -1252,7 +1288,7 @@ async function executeTranscriptionTask(taskId) {
       }
 
       splitCount++
-      
+
       // 上半场进度：20% + (已切分/总数) * 30%
       const splitProgress = 20 + Math.floor((splitCount / chunkCount) * 30)
       updateTask({ progress: splitProgress, message: `CODE:SPLITTING|${splitCount}|${chunkCount}` })
@@ -1260,12 +1296,12 @@ async function executeTranscriptionTask(taskId) {
 
     // 🎯 切分全部完成，等待剩余的转录任务
     console.log(`[Task ${taskId}] ✅ Split complete: ${splitCount} chunks, waiting for ${activeTranscriptions.length} transcriptions...`)
-    
+
     // 切换到下半场：从 50% 开始算转录进度
-    updateTask({ 
-      status: 'transcribing', 
+    updateTask({
+      status: 'transcribing',
       progress: 50 + Math.floor((transcribeCount / chunkCount) * 40),
-      message: `CODE:TRANSCRIBING|${transcribeCount}|${chunkCount}|${successCount}` 
+      message: `CODE:TRANSCRIBING|${transcribeCount}|${chunkCount}|${successCount}`
     })
 
     // 等待所有剩余的转录任务完成
@@ -1274,7 +1310,7 @@ async function executeTranscriptionTask(taskId) {
 
     stats.split = Date.now() - pipelineStart
     stats.transcribe = stats.split // 流水线模式下两者重叠
-    
+
     console.log(`[Task ${taskId}] ✅ Pipeline complete: ${successCount}/${chunkCount} successful`)
 
     // 5. 拼接结果

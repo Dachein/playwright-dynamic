@@ -389,34 +389,90 @@ Content-Type: application/json
 
 ### POST /screenshot
 
-网页截图接口，支持内容净化。
+网页截图接口，支持元素选择、区域裁剪、等待条件和内容净化。
 
 **请求体：**
 
 ```json
 {
   "url": "https://example.com",
-  "token": "mindtalk-secret-2026",
-  "fullPage": true,
+  "fullPage": false,
   "type": "png",
   "quality": 80,
+  "viewport": { "width": 800, "height": 1200 },
+  "selector": "#main-content",
+  "clip": { "x": 0, "y": 0, "width": 800, "height": 1067 },
+  "browser": {
+    "waitForSelector": "[data-loaded]",
+    "waitTimeout": 15000,
+    "userAgent": "Mozilla/5.0 ..."
+  },
   "extraction": {
     "removeSelectors": [".ad", ".popup"]
   }
 }
 ```
 
+**参数说明：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `url` | string | ✅ | 目标 URL（支持 `data:text/html` 格式） |
+| `fullPage` | boolean | ❌ | 是否截取整页，默认 `false` |
+| `type` | string | ❌ | 图片格式：`png`（默认）或 `jpeg` |
+| `quality` | number | ❌ | JPEG 质量 1-100，默认 80 |
+| `viewport` | object | ❌ | 视口尺寸 `{ width, height }` |
+| `selector` | string | ❌ | CSS 选择器，截取特定元素 |
+| `clip` | object | ❌ | 裁剪区域 `{ x, y, width, height }`，见下方说明 |
+| `browser.waitForSelector` | string | ❌ | 等待指定选择器出现后再截图 |
+| `browser.waitTimeout` | number | ❌ | waitForSelector 超时时间（ms），默认 15000 |
+| `browser.userAgent` | string | ❌ | 自定义 User-Agent |
+| `extraction.removeSelectors` | array | ❌ | 截图前移除的元素选择器列表 |
+
+**clip 裁剪逻辑：**
+
+- **只有 `clip`**：相对于页面左上角裁剪
+- **`selector` + `clip`**：clip 坐标相对于元素左上角，自动转换为页面绝对坐标
+- **只有 `selector`**：截取整个元素
+
 **响应：**
+
+成功时直接返回图片二进制数据（Content-Type: image/png 或 image/jpeg）
+
+```
+HTTP/1.1 200 OK
+Content-Type: image/png
+X-Duration-Ms: 2500
+
+<binary image data>
+```
+
+失败时返回 JSON：
 
 ```json
 {
-  "success": true,
-  "screenshot": "data:image/png;base64,iVBORw0KGgo...",
-  "stats": {
-    "duration": 2500
+  "success": false,
+  "error": "Selector \"#main-content\" not found"
+}
+```
+
+**示例：PDF 第一页缩略图（3:4 比例）**
+
+```json
+{
+  "url": "data:text/html;charset=utf-8,...",
+  "type": "png",
+  "viewport": { "width": 800, "height": 1200 },
+  "selector": "#pdf-canvas",
+  "clip": { "x": 0, "y": 0, "width": 800, "height": 1067 },
+  "browser": {
+    "waitForSelector": "[data-rendered]",
+    "waitTimeout": 20000
   }
 }
 ```
+
+此配置会等待 PDF.js 渲染完成（`data-rendered` 属性出现），然后截取 Canvas 元素的顶部 800×1067 区域。
 
 ---
 

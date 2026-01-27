@@ -33,8 +33,23 @@ echo "API_TOKEN=mindtalk-secret-2026" >> .env
 ```bash
 # 拉取最新代码 -> 自动构建镜像 -> 重启受影响的容器
 # 💡 如果只改了 src/ 下的代码，不会重新下载 npm 依赖和 Playwright Chromium
-# 💡 如果遇到 BuildKit 错误，使用: DOCKER_BUILDKIT=0 git pull origin main && docker-compose up -d --build
 git pull origin main && docker-compose up -d --build
+```
+
+**⚠️ 常见错误处理：**
+
+**1. BuildKit 错误：**
+```bash
+DOCKER_BUILDKIT=0 git pull origin main && DOCKER_BUILDKIT=0 docker-compose up -d --build
+```
+
+**2. ContainerConfig 错误（docker-compose 版本兼容性问题）：**
+```bash
+# 先停止并删除旧容器
+docker-compose down
+
+# 重新构建并启动
+DOCKER_BUILDKIT=0 docker-compose up -d --build
 ```
 
 **💡 构建加速原理：**

@@ -1,6 +1,6 @@
 {
   "name": "playwright-dynamic",
-  "version": "3.7.0",
+  "version": "3.7.1",
   "description": "国内 Playwright 服务 - 用于动态规则提取与微信公众号内容抓取",
   "main": "src/index.js",
   "scripts": {

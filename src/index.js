@@ -1380,7 +1380,7 @@ async function executeTranscriptionTask(taskId) {
 // ============================================
 app.listen(PORT, () => {
   console.log(`
-🎭 Playwright Dynamic Service v3.6
+🎭 Playwright Dynamic Service v3.7.1
 ===================================
 Port: ${PORT}
 Token: ${API_TOKEN.substring(0, 8)}...

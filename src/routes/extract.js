@@ -4,6 +4,55 @@
 
 const TurndownService = require('turndown')
 
+/** 随机延迟 ms */
+function randomDelay(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
+
+/** 模拟人类行为：等待、鼠标移动、滚动 */
+async function simulateHumanBehavior(page, viewport, opts = {}) {
+  const { isMobile = false } = opts
+  const w = viewport?.width || 375
+  const h = viewport?.height || 812
+
+  // 1. 初始随机等待（模拟用户看到页面后的停顿）
+  const initDelay = randomDelay(800, 1500)
+  console.log(`[Extract] 🎭 simulateHumanBehavior: init delay ${initDelay}ms`)
+  await page.waitForTimeout(initDelay)
+
+  // 2. 在页面内 dispatch 模拟事件（补充 Playwright 可能漏掉的指纹）
+  await page.evaluate(() => {
+    const centerX = window.innerWidth / 2 + (Math.random() - 0.5) * 80
+    const centerY = window.innerHeight / 2 + (Math.random() - 0.5) * 60
+    const el = document.elementFromPoint(centerX, centerY) || document.body
+
+    const opts = { bubbles: true, cancelable: true, view: window }
+    el.dispatchEvent(new MouseEvent('mousemove', { ...opts, clientX: centerX, clientY: centerY }))
+    el.dispatchEvent(new MouseEvent('mouseover', { ...opts, clientX: centerX, clientY: centerY }))
+  })
+
+  await page.waitForTimeout(randomDelay(200, 400))
+
+  // 3. 人类化滚动：小步长 + 随机间隔
+  await page.evaluate(async () => {
+    const rand = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+    let y = 0
+    const maxScroll = Math.min(document.body.scrollHeight, 3000)
+    while (y < maxScroll) {
+      const step = rand(80, 180)
+      window.scrollBy(0, step)
+      y += step
+      await sleep(rand(80, 200))
+    }
+    window.scrollTo(0, 0)
+    await sleep(rand(300, 600))
+  })
+
+  await page.waitForTimeout(randomDelay(300, 600))
+  console.log('[Extract] 🎭 simulateHumanBehavior done')
+}
+
 async function extractHandler(req, res, { getBrowser, normalizeCookies }) {
   const startTime = Date.now()
   const stats = { setup: 0, navigate: 0, scroll: 0, extract: 0, convert: 0, jscript: 0 }
@@ -85,6 +134,12 @@ async function extractHandler(req, res, { getBrowser, normalizeCookies }) {
       await page.waitForSelector(waitSelector, { state: 'attached', timeout: 5000 })
     } catch (e) {
       console.log(`[Extract] ⚠️ Selector "${waitSelector}" not found`)
+    }
+
+    // 模拟人类行为（降低自动化指纹识别）
+    if (browserConfig?.simulateHumanBehavior) {
+      const viewport = isMobile ? { width: 375, height: 812 } : { width: 1920, height: 1080 }
+      await simulateHumanBehavior(page, viewport, { isMobile })
     }
 
     // JScript 模式

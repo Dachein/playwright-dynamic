@@ -10,7 +10,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - API_TOKEN=${API_TOKEN:-mindtalk-secret-2026}
+      - API_TOKEN=${API_TOKEN:?API_TOKEN is required}
       - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
       - CF_WORKERS_AI_TOKEN=${CF_WORKERS_AI_TOKEN}
     restart: always

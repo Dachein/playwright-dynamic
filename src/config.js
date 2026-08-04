@@ -8,7 +8,10 @@ const { version: VERSION } = require('../package.json')
 // 服务器配置
 // ============================================
 const PORT = process.env.PORT || 3000
-const API_TOKEN = process.env.API_TOKEN || 'mindtalk-secret-2026'
+const API_TOKEN = process.env.API_TOKEN
+if (!API_TOKEN) {
+  throw new Error('API_TOKEN is required')
+}
 
 // ============================================
 // Cloudflare Workers AI 配置（用于音频转录）

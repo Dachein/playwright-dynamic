@@ -65,7 +65,6 @@ COPY src ./src
 
 # 8. 设置环境变量
 ENV PORT=3000
-ENV API_TOKEN=mindtalk-secret-2026
 ENV NODE_ENV=production
 
 # 9. 暴露端口

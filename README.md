@@ -100,7 +100,7 @@ docker build -t playwright-dynamic .
 ```bash
 docker run -d \
   --name playwright-dynamic \
-  -e API_TOKEN=mindtalk-secret-2026 \
+  -e API_TOKEN=<private-service-token> \
   --restart always \
   playwright-dynamic
 ```
@@ -226,7 +226,7 @@ docker build -t playwright-dynamic .
 # 4. 启动服务
 docker run -d \
   --name playwright-dynamic \
-  -e API_TOKEN=mindtalk-secret-2026 \
+  -e API_TOKEN=<private-service-token> \
   --restart always \
   playwright-dynamic
 
@@ -304,7 +304,7 @@ Content-Type: application/json
 ```json
 {
   "url": "https://mp.weixin.qq.com/s/xxx",
-  "token": "mindtalk-secret-2026",
+  "token": "<private-service-token>",
   "cookies": [
     {
       "name": "session_id",
@@ -485,7 +485,7 @@ X-Duration-Ms: 2500
 ```json
 {
   "url": "https://example.com",
-  "token": "mindtalk-secret-2026",
+  "token": "<private-service-token>",
   "format": "A4",
   "margin": {
     "top": "20mm",
@@ -522,7 +522,7 @@ X-Duration-Ms: 2500
 ```json
 {
   "url": "https://example.com",
-  "token": "mindtalk-secret-2026"
+  "token": "<private-service-token>"
 }
 ```
 

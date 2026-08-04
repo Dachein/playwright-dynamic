@@ -23,7 +23,7 @@ docker rm -f playwright-dynamic cf-tunnel || true
 # 3. 创建私密环境配置文件 (只需要做一次)
 # 替换其中的 Token 为你真实的值
 echo "CF_TUNNEL_TOKEN=你的_CF_TUNNEL_TOKEN" > .env
-echo "API_TOKEN=mindtalk-secret-2026" >> .env
+echo "API_TOKEN=<private-service-token>" >> .env
 ```
 
 ### 2. 日常自动升级命令

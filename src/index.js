@@ -57,6 +57,7 @@ const screenshotRoute = require('./routes/screenshot')
 const pdfRoute = require('./routes/pdf')
 const audioChunkRoute = require('./routes/audio-chunk')
 const { transcribeHandler, transcribeStatusHandler } = require('./routes/transcribe')
+const { xiaoyuzhouHandler } = require('./routes/xiaoyuzhou')
 
 const app = express()
 
@@ -73,6 +74,8 @@ app.get('/health', (req, res) => healthRoute(req, res, {
 app.post('/extract', authMiddleware, (req, res) => extractRoute(req, res, { getBrowser, normalizeCookies }))
 
 app.post('/content', authMiddleware, (req, res) => contentRoute(req, res, { getBrowser }))
+
+app.post('/xiaoyuzhou/episode', authMiddleware, xiaoyuzhouHandler)
 
 app.post('/screenshot', authMiddleware, (req, res) => screenshotRoute(req, res, { getBrowser, normalizeCookies }))
 

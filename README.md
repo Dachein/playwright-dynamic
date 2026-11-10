@@ -528,6 +528,21 @@ X-Duration-Ms: 2500
 
 ---
 
+### POST /xiaoyuzhou/episode
+
+通过节点的普通 HTTP 请求获取小宇宙节目元数据，不启动浏览器。请求头使用
+`x-api-token` 认证；请求体为 `{"episode_id":"6acef4af8c09f0c493c1c39b"}`。
+接口仅接受 24 位十六进制节目 ID，并固定访问 `www.xiaoyuzhoufm.com`，不接受任意 URL。
+
+成功返回 `{ success: true, episode, stats }`，其中 `episode.enclosure.url` 为音频地址，
+`episode.duration` 为秒数。调用方将这两个字段传给同一节点现有的 `/transcribe` 接口。
+缺失节目、无音频地址或上游请求失败返回 502；超时返回 504；错误包含稳定的 `error`
+代码及可用的 `upstream_status`，不返回网页正文。
+
+回归验证：`node --test test/xiaoyuzhou.test.js`。
+
+---
+
 ## 五、本地开发
 
 ### 5.1 环境准备
